@@ -74,12 +74,14 @@ The container publishes plain HTTP on `BIND_ADDRESS:PORT` (default `0.0.0.0:8080
 interface). Docker-published ports bypass host firewalls such as ufw; set `BIND_ADDRESS` to one
 address (for example the LAN address, or `127.0.0.1` behind a local proxy) to narrow it.
 
-Plain HTTP from another machine is not a secure context. In Chromium over `http://<LAN address>`
-all seven apps still load and render, but WebGPU and the Origin Private File System are
-unavailable: rendering falls back to WebGL2, and apps that keep projects or libraries in OPFS
-(FilmCraft, LightCraft, EffectCraft) fall back to IndexedDB or memory. The clipboard API is also
-unavailable. For full functionality on the LAN, serve it through an HTTPS reverse proxy with a
-certificate the clients trust:
+Plain HTTP from another machine is not a secure context. Observed in Chromium over
+`http://<LAN address>`: all seven apps load and show their start screens, but `navigator.gpu`
+(WebGPU) and the Origin Private File System are unavailable, as is the clipboard API. According
+to the apps' own hosting notes, rendering then falls back to WebGL2, and EffectCraft and LightCraft
+fall back from OPFS to IndexedDB (EffectCraft: or memory only, which keeps nothing after the tab
+closes). Saving and reopening projects over plain HTTP has not been tested. For full
+functionality on the LAN, serve it through an HTTPS reverse proxy with a certificate the clients
+trust:
 
 - Redirects are relative, so the site works under any host name and behind a path prefix.
 - List the proxy in `[server] trusted_proxies` so `X-Forwarded-Proto/-Host` are honoured (secure
