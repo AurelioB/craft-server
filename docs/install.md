@@ -8,38 +8,36 @@
   (`release-assets.githubusercontent.com` as of October 2026) for updates. Installed apps keep
   being served without it.
 - An HTTPS reverse proxy for anything other than `localhost` (see [HTTPS](#https-and-the-reverse-proxy)).
-- Disk: one release of each of the seven apps took about 280 MB in `DATA_DIR` and their archives
-  about 160 MB in `CACHE_DIR` (October 2026 releases). Retention keeps several releases per app;
-  the archive cache is bounded by `cache_max_size`.
+- Disk: one release of each of the seven apps took about 280 MB in `DATA_DIR` before
+  precompression; the `.br`/`.gz` copies written at install time add roughly half of that. The
+  downloaded archives took about 160 MB in `CACHE_DIR` (October 2026 releases). Retention keeps
+  several releases per app; the archive cache is bounded by `cache_max_size`.
 
-## 1. Choose identities and directories
+## 1. Choose identity and directories
 
-Edit `.env` (copy `.env.example`). All host paths are bind-mount sources; container-side paths
-are fixed:
+Edit `.env` (copy `.env.example`). Host paths are bind-mount sources; container paths are fixed:
 
 | Setting | Container path | Access | Holds |
 | --- | --- | --- | --- |
-| `CONFIG_DIR` | `/config` | updater, read-only | `config.toml`, optional GitHub token file |
-| `DATA_DIR` | `/srv/data` | updater read-write, web read-only | releases, `public/` (status, entry links), `.staging/` |
-| `STATE_DIR` | `/srv/state` | updater | per-app state, history, lock, heartbeat |
-| `CACHE_DIR` | `/srv/cache` | updater | verified release archives, API response cache |
-| `WORK_DIR` | `/srv/work` | updater | in-progress downloads |
-| `LOG_DIR` (optional) | `/srv/logs` | updater | rotated `updater.log` |
-| `WEB_WORKING_DIR` | — | — | working directory of nginx (default `/tmp`) |
-| `UPDATER_WORKING_DIR` | — | — | working directory of the updater (default `/srv/work`) |
+| `CONFIG_DIR` | `/config` | read-only | `config.toml`, admin users file, GitHub token, OIDC client secret |
+| `DATA_DIR` | `/srv/data` | read-write | releases (`releases/<app>/<version>`, `current` pointers), `.staging/` |
+| `STATE_DIR` | `/srv/state` | read-write | per-app state, history, lock, heartbeat |
+| `CACHE_DIR` | `/srv/cache` | read-write | verified release archives, API response cache |
+| `WORK_DIR` | `/srv/work` | read-write | in-progress downloads |
+| `LOG_DIR` (optional) | `/srv/logs` | read-write | rotated `updater.log` |
+| `WORKING_DIR` | — | — | working directory of the process (default `/srv/work`) |
 
 - Relative host paths resolve from the project directory; production setups should use absolute
-  paths. Paths may contain spaces (no quoting or shell concatenation is involved).
-- The directories must be separate and must not be nested in each other; `doctor` checks this.
+  paths. Paths may contain spaces.
+- The directories must be separate and not nested in each other; `doctor` checks this.
 - `WORK_DIR` and `CACHE_DIR` may be on other filesystems. Staging always happens inside
-  `DATA_DIR/.staging` so that publishing is a single atomic rename on one filesystem.
+  `DATA_DIR/.staging` so that publishing is one atomic rename on one filesystem.
 - No document workspace is mounted: the browser apps cannot use server folders.
 
 ## 2. Prepare the directories
 
-Compose is configured with `create_host_path: false`, so missing directories make
-`docker compose up` fail instead of Docker creating root-owned ones. Nothing ever changes
-ownership recursively. Create them once, owned by the updater identity:
+Compose uses `create_host_path: false`, so missing directories make `docker compose up` fail
+instead of Docker creating root-owned ones. Nothing ever changes ownership. Create them once:
 
 ```sh
 sudo install -d -o "$RUN_UID" -g "$RUN_GID" -m 2775 \
@@ -48,10 +46,7 @@ sudo install -d -o "$RUN_UID" -g "$RUN_GID" -m 2775 \
 cp config.example.toml /srv/craft-apps/config/config.toml
 ```
 
-Mode `2775` keeps the group shared and makes new files inherit it (setgid); use `2755` or `0750`
-if the web server runs as the same user. See [permissions](permissions.md) for split identities.
-
-Optional GitHub token (raises the API limit from 60 to 5000 requests/hour; not needed for
+Optional GitHub token (raises the API limit from 60 to 5000 requests per hour; not needed for
 hourly checks of seven apps thanks to conditional requests):
 
 ```sh
@@ -59,51 +54,63 @@ install -m 0400 -o "$RUN_UID" /dev/stdin /srv/craft-apps/config/github-token <<<
 # config.toml: [updater] github_token_file = "github-token"
 ```
 
-The token is read by the updater only, never logged, and never mounted into the web container.
+Secrets in `CONFIG_DIR` are never logged, printed or served.
 
 ## 3. Build, check and start
 
 ```sh
-docker compose build updater
-docker compose run --rm --no-deps updater doctor --offline
+docker compose build
+docker compose run --rm host doctor --offline
 docker compose up -d
-docker compose exec updater craft-updater doctor     # includes GitHub and validation-listener checks
+docker compose exec host craft-host doctor     # includes GitHub and OIDC connectivity
 ```
 
-`doctor` exits non-zero on any `FAIL` and prints the preparation command for each problem.
+`doctor` exits non-zero on any `FAIL` and prints a preparation command for each problem. To
+enable the administration page, follow [admin.md](admin.md).
 
 ## HTTPS and the reverse proxy
 
-The web service publishes plain HTTP on `WEB_BIND_ADDRESS:WEB_PORT` (default
-`127.0.0.1:8080`). Outside `localhost`, serve it through an HTTPS reverse proxy of your choice:
-browsers only allow WebGPU, the clipboard, module workers in some apps and persistent storage in
-a secure context.
+The container publishes plain HTTP on `BIND_ADDRESS:PORT` (default `127.0.0.1:8080`). Outside
+`localhost`, serve it through an HTTPS reverse proxy of your choice: browsers only allow WebGPU,
+the clipboard and persistent storage in a secure context.
 
 - Redirects are relative, so the site works under any host name and behind a path prefix.
-- Do not publish port 8081 (the private validation listener); Compose does not.
-- Authentication, if wanted, belongs to the proxy. The updater has no network-facing interface.
+- List the proxy in `[server] trusted_proxies` so `X-Forwarded-Proto/-Host` are honoured (secure
+  cookies, admin host matching) and, with `[admin] auth = "proxy"`, its identity headers.
+- Give `/admin` its own host name (`[admin] host`), see [admin.md](admin.md#browser-origin-isolation).
 - Browser storage is per origin: a LAN name and a public name for the same server have separate
   app libraries. Pick one canonical host name per app.
-- `/healthz` (web liveness) and `/readyz/<app>` (app installed) are suitable for proxy health
-  checks; neither reveals details.
+- `/healthz` (process alive) and `/readyz/<app>` (app installed) suit proxy health checks.
 
 ## Upgrading this project
 
-App updates are automatic. Updating the host itself (nginx image, updater code) is a separate
-maintenance step:
+App updates are automatic. Updating the host itself is a separate maintenance step:
 
 ```sh
 git pull
-docker compose build updater
+docker compose build
 docker compose up -d
 ```
 
-Installed releases, state and cache are unaffected. Pin image digests in `.env`
-(`WEB_IMAGE=nginxinc/nginx-unprivileged@sha256:…`) if you want fully reproducible runtimes.
+Installed releases, state and cache are kept. Releases installed by earlier versions get their
+precompressed copies added in the background after the upgrade.
+
+### From the two-service layout (web + updater)
+
+Earlier versions ran nginx and the updater as separate services. To upgrade:
+
+1. In `.env`: replace `WEB_BIND_ADDRESS`/`WEB_PORT` with `BIND_ADDRESS`/`PORT`; remove
+   `WEB_UID`, `WEB_GID`, `UPDATER_UID`, `UPDATER_GID` and the `*_SUPPLEMENTAL_GID` settings
+   (use `SUPPLEMENTAL_GID` if needed); replace `UPDATER_WORKING_DIR` with `WORKING_DIR`.
+2. In `config.toml`: delete `[updater] validation_url` (unknown keys are rejected).
+3. `docker compose down --remove-orphans && docker compose build && docker compose up -d`.
+4. Optionally delete `DATA_DIR/public`; it is no longer used.
+
+Releases, pins, blocks and history carry over.
 
 ## Persistent logs
 
-Container logs (`docker compose logs updater`) are the default. To also keep rotated files:
+Container logs (`docker compose logs host`) are the default. To also keep rotated files:
 
 ```dotenv
 LOG_DIR=/srv/craft-apps/logs

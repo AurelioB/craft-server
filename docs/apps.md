@@ -37,8 +37,8 @@ Common to all seven:
 build scripts, `.so` and `.rlib` files. The site never references them. The manifest excludes
 these paths (documented configuration, not patching); without the exclusion the updater rejects
 the release because it contains native executables. The remaining files, including the
-precompressed copies, are published unchanged; `.gz` copies are verified to decompress to their
-originals because nginx serves them in place of the originals (`gzip_static`).
+precompressed copies, are published unchanged; shipped `.gz`/`.br` copies are verified to
+decompress to their originals because the server sends them in place of the originals.
 
 ## Service workers
 
