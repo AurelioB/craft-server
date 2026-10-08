@@ -179,6 +179,9 @@ pub struct AppConfig {
     pub notes: String,
     pub keep_latest: u32,
     pub keep_days: u32,
+    /// Optional separate origin (scheme://host[:port]) for this app's links, giving it browser
+    /// storage of its own. The web server answers on any host name.
+    pub origin: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -307,6 +310,7 @@ struct RawApp {
     entry: Option<String>,
     keep_latest: Option<u32>,
     keep_days: Option<u32>,
+    origin: Option<String>,
     // definition (built-in manifest, or operator-defined apps)
     name: Option<String>,
     repository: Option<String>,
@@ -338,6 +342,7 @@ impl RawApp {
             entry: o.entry.or(self.entry),
             keep_latest: o.keep_latest.or(self.keep_latest),
             keep_days: o.keep_days.or(self.keep_days),
+            origin: o.origin.or(self.origin),
             name: o.name.or(self.name),
             repository: o.repository.or(self.repository),
             artifact_patterns: o.artifact_patterns.or(self.artifact_patterns),
@@ -415,6 +420,32 @@ pub fn valid_id(s: &str) -> bool {
         && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
         && b.iter()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+}
+
+/// `http(s)://host[:port]` with DNS-style labels (or IPv4) and a port in 1..=65535.
+/// IPv6 literals are not accepted.
+fn valid_origin(o: &str) -> bool {
+    let Some(rest) = o
+        .strip_prefix("https://")
+        .or_else(|| o.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let (host, port) = match rest.rsplit_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (rest, None),
+    };
+    let port_ok = port.is_none_or(|p| {
+        p.parse::<u16>().is_ok_and(|n| n > 0) && p.bytes().all(|c| c.is_ascii_digit())
+    });
+    let label_ok = |l: &str| {
+        !l.is_empty()
+            && l.len() <= 63
+            && l.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+            && !l.starts_with('-')
+            && !l.ends_with('-')
+    };
+    port_ok && !host.is_empty() && host.len() <= 253 && host.split('.').all(label_ok)
 }
 
 fn valid_dir_component(s: &str) -> bool {
@@ -557,6 +588,18 @@ fn build_app(
             w("icon")
         ));
     }
+    let origin = raw
+        .origin
+        .map(|o| o.trim().trim_end_matches('/').to_string())
+        .filter(|o| !o.is_empty());
+    if let Some(o) = &origin
+        && !valid_origin(o)
+    {
+        problems.push(format!(
+                "{}: {o:?} must be http(s)://host[:port] without a path, e.g. \"https://lightcraft.example.net\"",
+                w("origin")
+            ));
+    }
     Some(AppConfig {
         id: id.to_string(),
         name: raw.name.unwrap(),
@@ -576,6 +619,7 @@ fn build_app(
         notes: raw.notes.unwrap_or_default(),
         keep_latest: raw.keep_latest.unwrap_or(retention.keep_latest),
         keep_days: raw.keep_days.unwrap_or(retention.keep_days),
+        origin,
     })
 }
 
@@ -823,7 +867,7 @@ pub fn load_config(paths: Paths) -> Result<Config, ConfigError> {
             .unwrap_or_default();
         if over.defines_app() {
             problems.push(format!(
-                "[apps.{id}]: built-in apps accept only enabled, auto_update, pinned_version, channel, release_dir, entry, keep_latest and keep_days"
+                "[apps.{id}]: built-in apps accept only enabled, auto_update, pinned_version, channel, release_dir, entry, origin, keep_latest and keep_days"
             ));
         }
         seen.push(id.clone());
@@ -977,6 +1021,30 @@ entry = "effectcraft"
             "{:?}",
             err.0
         );
+    }
+
+    #[test]
+    fn separate_origins_are_normalized_and_validated() {
+        let cfg =
+            load("[apps.lightcraft]\norigin = \"https://lightcraft.example.net/\"\n").unwrap();
+        assert_eq!(
+            cfg.app("lightcraft").unwrap().origin.as_deref(),
+            Some("https://lightcraft.example.net")
+        );
+        let err =
+            load("[apps.lightcraft]\norigin = \"https://example.net/lightcraft\"\n").unwrap_err();
+        assert!(err.0[0].contains("[apps.lightcraft] origin"), "{:?}", err.0);
+        for bad in [
+            "https://.",
+            "https://host:99999",
+            "https://host:0",
+            "ftp://host",
+            "https://-x.net",
+            "https://[::1]",
+        ] {
+            assert!(!valid_origin(bad), "{bad}");
+        }
+        assert!(valid_origin("http://192.168.1.10:8080"));
     }
 
     #[test]

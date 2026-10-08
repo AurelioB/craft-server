@@ -511,6 +511,7 @@ mod tests {
             notes: String::new(),
             keep_latest: 3,
             keep_days: 30,
+            origin: None,
         }
     }
 

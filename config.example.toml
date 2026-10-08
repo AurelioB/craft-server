@@ -45,6 +45,8 @@ cache_max_size = "2GiB"      # downloaded archives (least recently used are remo
 # release_dir = "releases/photocraft"   # relative to DATA_DIR
 # keep_latest = 3
 # keep_days = 30
+# origin = ""                  # e.g. "https://lightcraft.example.net": link the app on its own
+#                               # host name so it gets separate browser storage
 #
 # Additional apps also define name, repository, artifact_patterns and optionally
 # checksum_assets, exclude, icon and notes:

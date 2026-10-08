@@ -126,13 +126,19 @@ pub fn app_status(cfg: &Config, app: &AppConfig, state: &AppState, public: bool)
     } else {
         "installing"
     };
+    // Links are relative to the launcher, or absolute when the app has its own origin.
+    let base = app
+        .origin
+        .as_ref()
+        .map(|o| format!("{o}/"))
+        .unwrap_or_default();
     AppStatus {
         id: app.id.clone(),
         name: app.name.clone(),
-        url: format!("{}/", app.entry),
+        url: format!("{base}{}/", app.entry),
         state: st.into(),
         enabled: app.enabled,
-        active_url: active.as_ref().map(|v| format!("{}/{v}/", app.entry)),
+        active_url: active.as_ref().map(|v| format!("{base}{}/{v}/", app.entry)),
         icon: active
             .as_ref()
             .filter(|v| {
