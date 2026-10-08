@@ -89,7 +89,7 @@ function row(app) {
   const pinnable = [...new Set([app.latest, ...app.installed].filter(Boolean))];
   box.append(selectWithButton("Pin", pinnable, (v) => act(app.id, "pin", v)));
   if (app.pinned) box.append(button("Unpin", () => act(app.id, "unpin")));
-  const older = app.installed.filter((v) => v !== app.active);
+  const older = app.installed.filter((v) => v !== app.active && v !== app.pending);
   if (older.length) box.append(selectWithButton("Roll back", older, (v) => act(app.id, "rollback", v)));
   for (const b of app.blocked) box.append(button(`Allow ${b}`, () => act(app.id, "allow", b)));
   actions.append(box);

@@ -144,7 +144,8 @@ pub fn strip_write_bits(root: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn restore_owner_write(root: &Path) -> io::Result<()> {
+/// Re-grant owner write on a directory tree's directories (not files).
+pub fn restore_owner_write(root: &Path) -> io::Result<()> {
     let meta = fs::symlink_metadata(root)?;
     if !meta.is_dir() {
         return Ok(());

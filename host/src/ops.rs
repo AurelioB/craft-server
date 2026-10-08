@@ -404,11 +404,26 @@ impl<'a> Updater<'a> {
             return Ok(Outcome::UpToDate(Some(version.to_string())));
         }
         if self.wants_staging(app, state, manual) {
-            state.pending = Some(version.to_string());
+            self.stage(app, state, version)?;
             return Ok(Outcome::Staged(version.to_string()));
         }
         self.go_live(app, state, version, "")?;
         Ok(Outcome::Activated(version.to_string()))
+    }
+
+    /// Leave an installed release waiting for idle activation (recorded once).
+    fn stage(&self, app: &AppConfig, state: &mut AppState, version: &str) -> Result<()> {
+        if state.pending.as_deref() != Some(version) {
+            state.pending = Some(version.to_string());
+            self.store.record(
+                &app.id,
+                "stage",
+                "waiting",
+                Some(version),
+                "activates when the app is idle",
+            )?;
+        }
+        Ok(())
     }
 
     /// Switch the active-version pointer and record it.
@@ -443,7 +458,7 @@ impl<'a> Updater<'a> {
                 self.store
                     .record(&app.id, "install", "ok", Some(&v), &c.asset.name)?;
                 if self.wants_staging(app, state, manual) {
-                    state.pending = Some(v.clone());
+                    self.stage(app, state, &v)?;
                     return Ok(Outcome::Staged(v));
                 }
                 self.go_live(app, state, &v, "")?;

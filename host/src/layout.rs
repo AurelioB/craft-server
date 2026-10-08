@@ -161,6 +161,61 @@ pub fn clean_staging(cfg: &Config) -> Result<Vec<String>> {
     Ok(removed)
 }
 
+/// Add missing precompressed copies to releases installed before they were generated at install
+/// time. Directories are made writable for the owner only while the copies are written; leftovers
+/// of an interrupted run (temporary files, writable directories) are cleaned up.
+pub fn backfill_precompressed(cfg: &Config) -> Result<Vec<String>> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut done = Vec::new();
+    for app in &cfg.apps {
+        for (version, marker) in installed_dirs(cfg, app) {
+            if marker.is_none() {
+                continue;
+            }
+            let dir = cfg.release_root(app).join(&version);
+            let mut paths = crate::fsutil::walk_tree(&dir)?;
+            paths.push(dir.clone());
+            let stale: Vec<PathBuf> = paths
+                .iter()
+                .filter(|p| {
+                    let n = p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    n.starts_with('.') && n.ends_with(".tmp")
+                })
+                .cloned()
+                .collect();
+            let writable = paths.iter().any(|p| {
+                fs::symlink_metadata(p).is_ok_and(|m| {
+                    !m.file_type().is_symlink() && m.permissions().mode() & 0o222 != 0
+                })
+            });
+            let missing = paths.iter().any(|p| {
+                let name = p.to_string_lossy();
+                fs::symlink_metadata(p)
+                    .is_ok_and(|m| m.is_file() && m.len() >= crate::precompress::MIN_BYTES)
+                    && crate::precompress::is_compressible(p)
+                    && !(Path::new(&format!("{name}.gz")).exists()
+                        && Path::new(&format!("{name}.br")).exists())
+            });
+            if !missing && stale.is_empty() && !writable {
+                continue;
+            }
+            // Copies are written to hidden temporary names (never served) and renamed, so readers
+            // never see partial files; the tree is made read-only again even if writing fails.
+            let result = crate::fsutil::restore_owner_write(&dir)
+                .and_then(|_| stale.iter().try_for_each(fs::remove_file))
+                .and_then(|_| crate::precompress::precompress_tree(&dir));
+            crate::fsutil::strip_write_bits(&dir)?;
+            let n = result.with_context(|| format!("precompress {}", dir.display()))?;
+            log::info!("{}: added {n} precompressed copies to {version}", app.id);
+            done.push(format!("{}/{version}", app.id));
+        }
+    }
+    Ok(done)
+}
+
 /// Bring state records in line with what is actually published, e.g. after a crash.
 ///
 /// The `current` symlink is the source of truth for the active release: it is replaced

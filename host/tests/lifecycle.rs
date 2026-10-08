@@ -810,3 +810,40 @@ fn retention_keeps_releases_that_open_tabs_recently_used() {
         "without recent use the policy removes it"
     );
 }
+
+#[test]
+fn backfill_adds_copies_to_older_releases_and_cleans_interrupted_runs() {
+    let gh = FakeGitHub::start();
+    let e = env(&gh);
+    let big = format!("export const d = \"{}\";\n", "x".repeat(4000));
+    gh.publish(
+        REPO,
+        "v1.0.0",
+        release_zip(&e.root(), "1.0.0", &[("big.js", big.as_bytes())]),
+        PublishOpts::default(),
+    );
+    update(&e);
+    let dir = e.release_dir("1.0.0");
+    // Simulate a release from an older version, plus a crash during an earlier backfill.
+    craft_host::fsutil::restore_owner_write(&dir).unwrap();
+    for c in ["big.js.gz", "big.js.br"] {
+        std::fs::remove_file(dir.join(c)).unwrap();
+    }
+    std::fs::write(dir.join(".big.js.gz.ab12.tmp"), b"partial").unwrap();
+    craft_host::fsutil::strip_write_bits(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let done = layout::backfill_precompressed(&e.cfg).unwrap();
+    assert_eq!(done, ["testcraft/1.0.0"]);
+    assert!(dir.join("big.js.gz").is_file() && dir.join("big.js.br").is_file());
+    assert!(!dir.join(".big.js.gz.ab12.tmp").exists());
+    assert_eq!(
+        std::fs::metadata(&dir).unwrap().permissions().mode() & 0o222,
+        0,
+        "read-only again"
+    );
+    assert!(
+        layout::backfill_precompressed(&e.cfg).unwrap().is_empty(),
+        "nothing left to do"
+    );
+}

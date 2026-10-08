@@ -74,6 +74,16 @@ pub fn activate_idle(cfg: &Config, updater: &Updater) {
 fn updater_loop(cfg: Arc<Config>, activity: Arc<Activity>, phase: Arc<Mutex<String>>) {
     let updater = Updater::new(&cfg).with_activity(activity);
     let lock_wait = Duration::from_secs(cfg.updater.lock_wait_secs);
+    // Releases installed by earlier versions lack precompressed copies; add them in the
+    // background so serving starts at once.
+    match updater.store.lock(lock_wait, "precompress backfill") {
+        Ok(_lock) => {
+            if let Err(e) = crate::layout::backfill_precompressed(&cfg) {
+                log::warn!("precompress backfill: {e:#}");
+            }
+        }
+        Err(e) => log::warn!("{e:#}"),
+    }
     let mut next = if cfg.updater.check_on_startup {
         now_epoch()
     } else {
@@ -157,16 +167,21 @@ pub fn run(cfg: Config) -> Result<()> {
 /// Container health check: the HTTP listener answers `/healthz`. The updater's heartbeat is
 /// reported in status instead, so an updater problem never restarts a working server.
 pub fn healthy(cfg: &Config) -> Result<(), String> {
-    let port = cfg.server.listen.port();
+    let mut addr = cfg.server.listen;
+    if addr.ip().is_unspecified() {
+        let loopback: std::net::IpAddr = if addr.is_ipv6() {
+            std::net::Ipv6Addr::LOCALHOST.into()
+        } else {
+            std::net::Ipv4Addr::LOCALHOST.into()
+        };
+        addr.set_ip(loopback);
+    }
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_global(Some(Duration::from_secs(5)))
         .build()
         .new_agent();
-    match agent
-        .get(&format!("http://127.0.0.1:{port}/healthz"))
-        .call()
-    {
+    match agent.get(&format!("http://{addr}/healthz")).call() {
         Ok(r) if r.status().as_u16() == 200 => Ok(()),
         Ok(r) => Err(format!("/healthz answered HTTP {}", r.status().as_u16())),
         Err(e) => Err(format!("/healthz unreachable: {e}")),
