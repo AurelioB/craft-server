@@ -111,13 +111,21 @@ host = "admin.apps.example.net"
 
 `/admin` then answers only on that host, and nothing else (launcher, apps, status) is served
 there; on every other host name `/admin` answers 404. The name must resolve from the clients:
-`admin.localhost`, for example, only works in a browser on the server itself. Behind a proxy
+`admin.localhost`, for example, only works in a browser on the server itself (browsers resolve
+`*.localhost` to their own loopback address). Behind a proxy
 listed in `[server] trusted_proxies`, `X-Forwarded-Host` decides; from other peers it is ignored.
 
 Cookies are not separated by port, and different ports or subdomains of one host are the same
 *site*. What keeps app pages away from admin actions is the browser's same-origin policy plus the
 server-side checks below: every action needs the CSRF header (which a cross-origin page cannot
 send without a CORS preflight the server never grants) and a matching `Origin`.
+
+With a separate port the host name is shared, so script on the apps' port can still set cookies
+that the admin port receives (for example a `craft_admin` or `craft_csrf` cookie with a narrower
+path). It cannot read the `HttpOnly` session cookie and cannot send an admin action, but it can
+disturb a session, e.g. sign an administrator out. Sibling host names behave alike, since
+`apps.example.net` may set cookies for `example.net`; only an admin host name under a different
+registrable domain avoids this.
 
 None of this encrypts traffic. Over plain HTTP, passwords and session cookies cross the network
 readable by anyone on the path; before using real administrator credentials, put the admin

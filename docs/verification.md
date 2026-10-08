@@ -40,8 +40,9 @@ The previous two-service deployment (directories under a path with a space, `RUN
   cross-origin status read were blocked by the browser, a no-CORS POST carried no CSRF header and
   triggered nothing, and `/admin/` on `:18080` answered 404. Plain HTTP: see
   [admin.md](admin.md#browser-origin-isolation).
-- Earlier, with `[admin] host = "admin.localhost"`, `/admin` answered only on
-  `http://admin.localhost:18080`; that name resolves only on the server itself.
+- Earlier, with `[admin] host = "admin.localhost"`, `/admin` answered only to requests for that
+  host name (404 for `localhost` and the LAN address). Browsers resolve `*.localhost` to their own
+  loopback address, so the name reached the server only from a browser on the server itself.
 
 ## Browser checks (headless Chromium, `http://localhost:18080`)
 
