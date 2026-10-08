@@ -1,0 +1,24 @@
+# Integration-test override: a static fake of the GitHub releases API on the project network,
+# and a deliberately small WORK_DIR to exercise disk-space handling. Used by
+# updater/tests/compose.rs; not for production.
+services:
+  fakegh:
+    image: ${WEB_IMAGE:-nginxinc/nginx-unprivileged:1.29-alpine}
+    user: "${RUN_UID}:${RUN_GID}"
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    entrypoint: ["nginx", "-g", "daemon off;"]
+    volumes:
+      - type: bind
+        source: ${FAKEGH_DIR:?}
+        target: /usr/share/nginx/html
+        read_only: true
+
+  updater:
+    volumes:
+      - type: tmpfs
+        target: /srv/work
+        tmpfs:
+          size: 1048576
+          mode: 01777
