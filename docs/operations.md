@@ -137,7 +137,7 @@ routing; restrict the shared host in the proxy if the app must not be used there
 
 | Directory | Back up? | Notes |
 | --- | --- | --- |
-| `CONFIG_DIR` | yes | configuration, admin users, token, OIDC secret (protect the backup) |
+| `CONFIG_DIR` | yes | configuration, users file, token, OIDC secret (protect the backup) |
 | `STATE_DIR` | yes | pins, blocks, pending, history; small |
 | `DATA_DIR` | optional | releases can be re-downloaded, but old versions may disappear upstream; back up to keep the ability to roll back |
 | `CACHE_DIR`, `WORK_DIR` | no | reproducible |

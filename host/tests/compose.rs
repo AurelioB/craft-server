@@ -270,9 +270,10 @@ retry_backoff = 0
 heartbeat_interval = "5s"
 [limits]
 min_free_space = 0
+[auth]
+method = "form"
 [admin]
-auth = "form"
-shared_origin = true
+enabled = true
 [apps.testcraft]
 name = "TestCraft"
 repository = "storytold/testcraft"
@@ -292,14 +293,14 @@ artifact_patterns = ["testcraft-web-{version}.zip"]
     }
     fs::write(base.join("config/config.toml"), cfg).unwrap();
     fs::write(
-        base.join("config/admin-users"),
+        base.join("config/users"),
         format!(
-            "ana:{}\n",
+            "ana:{}:admin\n",
             craft_host::auth::hash_password("s3cret").unwrap()
         ),
     )
     .unwrap();
-    for f in ["config/config.toml", "config/admin-users"] {
+    for f in ["config/config.toml", "config/users"] {
         fs::set_permissions(base.join(f), fs::Permissions::from_mode(0o640)).unwrap();
     }
     let port = free_port();
@@ -360,17 +361,12 @@ fn compose_stack_end_to_end() {
     // Update from /admin (form login) without restarting the server; old URLs keep working.
     let started = s.started_at();
     s.publish("1.1.0", &[]);
-    let login = s.http(
-        "POST",
-        "/admin/login",
-        &[],
-        Some("user=ana&password=s3cret"),
-    );
+    let login = s.http("POST", "/auth/login", &[], Some("user=ana&password=s3cret"));
     assert_eq!(login.status, 303, "{}", login.body);
     let session = login
         .cookies
         .iter()
-        .find(|c| c.starts_with("craft_admin="))
+        .find(|c| c.starts_with("craft_session="))
         .unwrap()
         .clone();
     let page = s.http("GET", "/admin/", &[("Cookie", &session)], None);

@@ -83,11 +83,39 @@ function notices(status) {
   }
 }
 
+// Who is signed in (when [auth] has a sign-in method); hidden for public, anonymous visits.
+async function account() {
+  let me;
+  try {
+    const res = await fetch("auth/me", { cache: "no-store" });
+    if (!res.ok) return;
+    me = await res.json();
+  } catch {
+    return;
+  }
+  if (me.method === "none") return;
+  document.getElementById("account-name").textContent = `${me.user} · ${me.role}`;
+  const admin = document.getElementById("account-admin");
+  if (me.admin_url) {
+    admin.href = me.admin_url;
+    admin.hidden = false;
+  }
+  const logout = document.getElementById("account-logout");
+  logout.hidden = !me.can_logout;
+  logout.addEventListener("click", async () => {
+    await fetch("auth/logout", { method: "POST" });
+    location.reload();
+  });
+  document.getElementById("account").hidden = false;
+}
+
 async function load() {
   const grid = document.getElementById("apps");
   let status;
   try {
     const res = await fetch("status.json", { cache: "no-cache" });
+    // Session ended while the page was open: reloading leads to the sign-in page.
+    if (res.status === 401) return location.reload();
     status = await res.json();
   } catch {
     grid.replaceChildren(el("p", { class: "placeholder" }, "Could not load the app list. Reload to try again."));
@@ -103,4 +131,5 @@ async function load() {
   if (status.apps.some((a) => a.state === "installing")) setTimeout(load, 10000);
 }
 
+account();
 load();

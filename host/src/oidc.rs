@@ -1,4 +1,4 @@
-//! OpenID Connect login for the administration interface: authorization-code flow with PKCE,
+//! OpenID Connect sign-in: authorization-code flow with PKCE,
 //! state and nonce.
 //!
 //! The ID token is taken directly from the token endpoint over a verified TLS connection, which
@@ -16,6 +16,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::access::OidcSettings;
+use crate::auth::query_escape;
 use crate::fsutil::random_hex;
 use crate::github::USER_AGENT;
 use crate::timeutil::now_epoch;
@@ -34,6 +35,8 @@ struct Discovery {
 struct Pending {
     nonce: String,
     verifier: String,
+    /// Site-relative page to return to after signing in.
+    next: String,
     expires: i64,
 }
 
@@ -48,17 +51,6 @@ pub struct Oidc {
 pub struct Identity {
     pub user: String,
     pub groups: Vec<String>,
-}
-
-fn query_escape(s: &str) -> String {
-    s.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
 }
 
 impl Oidc {
@@ -112,8 +104,10 @@ impl Oidc {
         Ok(d)
     }
 
-    /// Start a login: returns the provider URL to redirect the browser to.
-    pub fn start(&self) -> Result<String> {
+    /// Start a login that returns to `next`: the provider URL to redirect the browser to and the
+    /// `state`, which the caller binds to the browser (cookie) so a callback cannot be replayed in
+    /// another browser.
+    pub fn start(&self, next: String) -> Result<(String, String)> {
         let d = self.discovery()?;
         let state = random_hex(24);
         let nonce = random_hex(24);
@@ -128,6 +122,7 @@ impl Oidc {
                 Pending {
                     nonce: nonce.clone(),
                     verifier,
+                    next,
                     expires: now + PENDING_TTL,
                 },
             );
@@ -137,17 +132,19 @@ impl Oidc {
         } else {
             '?'
         };
-        Ok(format!(
+        let url = format!(
             "{}{sep}response_type=code&client_id={}&redirect_uri={}&scope={}&state={state}&nonce={nonce}&code_challenge={challenge}&code_challenge_method=S256",
             d.authorization_endpoint,
             query_escape(&self.settings.client_id),
             query_escape(&self.settings.redirect_url),
             query_escape(&self.settings.scopes.join(" ")),
-        ))
+        );
+        Ok((url, state))
     }
 
-    /// Finish a login from the callback's `code` and `state`.
-    pub fn finish(&self, code: &str, state: &str) -> Result<Identity> {
+    /// Finish a login from the callback's `code` and `state`: the identity and the page to
+    /// return to.
+    pub fn finish(&self, code: &str, state: &str) -> Result<(Identity, String)> {
         let pending = self
             .pending
             .lock()
@@ -189,7 +186,8 @@ impl Oidc {
         let id_token = tokens["id_token"]
             .as_str()
             .ok_or_else(|| anyhow!("token response has no id_token"))?;
-        self.identity_from(id_token, &d.issuer, &pending.nonce)
+        let identity = self.identity_from(id_token, &d.issuer, &pending.nonce)?;
+        Ok((identity, pending.next))
     }
 
     fn identity_from(&self, id_token: &str, issuer: &str, nonce: &str) -> Result<Identity> {
@@ -262,7 +260,7 @@ mod tests {
                 issuer: "https://id.example.net".into(),
                 client_id: "craft".into(),
                 client_secret_file: PathBuf::from("/nonexistent"),
-                redirect_url: "https://apps.example.net/admin/oidc/callback".into(),
+                redirect_url: "https://apps.example.net/auth/oidc/callback".into(),
                 scopes: vec!["openid".into()],
                 username_claim: "preferred_username".into(),
                 groups_claim: "groups".into(),

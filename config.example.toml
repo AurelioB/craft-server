@@ -5,7 +5,7 @@
 [server]
 listen = "0.0.0.0:8080"
 # Reverse proxies whose X-Forwarded-Proto/-Host and identity headers are believed (CIDR or
-# address). Needed for [admin] auth = "proxy" and for Secure cookies behind HTTPS.
+# address). Needed for [auth] method = "proxy" and for Secure cookies behind HTTPS.
 trusted_proxies = []           # e.g. ["172.16.0.0/12"]
 
 [updater]
@@ -43,43 +43,50 @@ keep_days = 30                 # plus every release installed within this many d
 keep_recently_used = "24h"     # plus releases that served requests this recently (open tabs)
 cache_max_size = "2GiB"        # downloaded archives (least recently used are removed)
 
-[admin]
-# disabled | none | basic | form | oidc | proxy
-#   none   no authentication: only behind a proxy that protects /admin
+[auth]
+# How people sign in, for /admin and (optionally) the apps:
+#   none   nobody signs in; with [admin] enabled, everyone who reaches /admin is an admin
+#          (only behind a proxy that protects /admin)
 #   basic  HTTP Basic against users_file
 #   form   login page and session cookie against users_file
-#   oidc   OpenID Connect login (see [admin.oidc])
-#   proxy  user from a header set by a trusted proxy (forward auth, see [admin.proxy])
-auth = "disabled"
-# When auth is not "disabled", /admin needs an origin of its own so app code never runs where an
-# administrator is signed in. Set ONE of:
-#   listen  a separate port, e.g. "0.0.0.0:8081" (published as ADMIN_PORT in .env): no DNS needed,
-#           open http://<server>:<ADMIN_PORT>/admin/ ; only /admin is served there
-#   host    a dedicated host name routed to this server, e.g. "admin.apps.example.net"
-listen = ""
-host = ""
-# Or serve /admin on the apps' address. Only if you accept that code served by an app could act
-# with a signed-in administrator's session.
-shared_origin = false
-users_file = "admin-users"     # relative to CONFIG_DIR; lines "name:<hash>", see `craft-host hash-password`
+#   oidc   OpenID Connect login (see [auth.oidc])
+#   proxy  user from a header set by a trusted proxy (forward auth, see [auth.proxy])
+method = "none"
+# Who may open the launcher and the apps: "public" (anyone who reaches the server) or
+# "signed-in" (accounts with the user or admin role; needs a method other than none).
+apps = "public"
+# basic and form: lines "name:<hash>:admin" or "name:<hash>:user" (role defaults to user),
+# relative to CONFIG_DIR; create hashes with `craft-host hash-password`.
+users_file = "users"
 session_ttl = "12h"
 cookie_secure = "auto"         # auto (Secure when the client used HTTPS) | always | never
-# For oidc and proxy: who may manage updates. Both empty = any authenticated user.
-allowed_users = []
-allowed_groups = []
+# oidc and proxy: roles from the account's groups (OIDC groups claim / proxy groups header).
+# Admins: these accounts or members of these groups; required while [admin] is enabled.
+admin_users = []
+admin_groups = []              # e.g. ["craft-admins"]
+# Users: members of these groups; empty = every account the provider signs in.
+user_groups = []               # e.g. ["craft-users"]
 
-# [admin.oidc]
+# [auth.oidc]
 # issuer = "https://auth.example.net/application/o/craft-apps"
 # client_id = "craft-apps"
 # client_secret_file = "oidc-client-secret"   # relative to CONFIG_DIR; omit for a public client
-# redirect_url = "https://admin.apps.example.net/admin/oidc/callback"
+# redirect_url = "https://apps.example.net/auth/oidc/callback"
 # scopes = ["openid", "profile", "email"]
 # username_claim = "preferred_username"
 # groups_claim = "groups"
 
-# [admin.proxy]
+# [auth.proxy]
 # user_header = "Remote-User"       # Authentik: "X-authentik-username"
 # groups_header = "Remote-Groups"   # Authentik: "X-authentik-groups" ('|' or ',' separated)
+
+[admin]
+# /admin on the same port as the apps, for accounts with the admin role.
+enabled = false
+# Optional: answer /admin only on this host name (same port), e.g. "admin.apps.example.net",
+# and serve no apps there. Without it, /admin shares the apps' browser origin: code served by
+# an app could act with a signed-in administrator's session. See docs/admin.md.
+host = ""
 
 # Per-app settings. Built-in apps: photocraft, vectorcraft, filmcraft, lightcraft, pdfcraft,
 # effectcraft, designcraft. Built-in apps accept only the keys shown here.

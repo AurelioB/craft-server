@@ -27,8 +27,10 @@ flowchart LR
   atomically in the background. Per app, a new release goes live **immediately** or once the
   app has had **no requests for a while** (`activation = "idle"`).
 - `/admin` shows versions, pending releases and failures, and runs check, update, apply, pin,
-  unpin, rollback and allow. Authentication: none, HTTP Basic, login form, OpenID Connect or a
-  trusted reverse proxy's identity header. It is disabled by default.
+  unpin, rollback and allow. It is disabled by default and lives on the same port as the apps.
+- Sign-in for `/admin` and, optionally, the apps: HTTP Basic, login form, OpenID Connect or a
+  trusted reverse proxy's identity header, with two roles: **admin** (apps and `/admin`) and
+  **user** (apps only). With OIDC or forward auth, roles come from identity-provider groups.
 
 No Docker socket, privileged mode, GPU or database is involved.
 
@@ -46,8 +48,8 @@ docker compose exec host craft-host status
 
 Open `http://127.0.0.1:8080/` (or put it behind your HTTPS reverse proxy; see
 [docs/install.md](docs/install.md)). The first installation takes a minute or two; the launcher
-shows which apps are still being installed. To enable `/admin`, see
-[docs/admin.md](docs/admin.md).
+shows which apps are still being installed. To enable `/admin` or require sign-in for the apps,
+see [docs/admin.md](docs/admin.md).
 
 ## Command line
 
@@ -62,12 +64,12 @@ shows which apps are still being installed. To enable `/admin`, see
 | `pin APP VERSION` / `unpin APP` | Hold an app on one release |
 | `rollback APP [VERSION]` / `allow APP VERSION` | Go back to a retained release / permit a blocked one |
 | `history [APP]` | Recent update history |
-| `hash-password` | Hash a password (stdin) for the admin users file |
+| `hash-password` | Hash a password (stdin) for the users file |
 
 ## Documentation
 
 - [Installation and deployment](docs/install.md)
-- [Administration interface and authentication](docs/admin.md)
+- [Sign-in, roles and the administration interface](docs/admin.md)
 - [Users, groups and permissions](docs/permissions.md)
 - [Operations](docs/operations.md): updates, activation, pins, rollback, retention, backup, recovery
 - [Applications](docs/apps.md): official artifacts, serving requirements, browser storage

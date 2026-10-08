@@ -5,13 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="same-origin">
   <title>Sign in — Craft Apps</title>
-  <link rel="stylesheet" href="admin.css">
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <form class="login" method="post" action="login">
     <h1>Sign in</h1>
-    <p class="muted">Manage app updates.</p>
+    <p class="muted">Craft Apps on this server.</p>
     <p class="error" id="failed" hidden>Wrong user name or password.</p>
+    <input type="hidden" name="next" id="next">
     <label for="user">User name</label>
     <input id="user" name="user" autocomplete="username" required autofocus>
     <label for="password">Password</label>
@@ -19,7 +20,10 @@
     <button class="primary" type="submit">Sign in</button>
   </form>
   <script>
-    if (new URLSearchParams(location.search).has("failed")) document.getElementById("failed").hidden = false;
+    const params = new URLSearchParams(location.search);
+    if (params.has("failed")) document.getElementById("failed").hidden = false;
+    // The server validates this target again; it only ever redirects within the site.
+    document.getElementById("next").value = params.get("next") || "";
   </script>
 </body>
 </html>

@@ -1,5 +1,5 @@
-//! The HTTP server: launcher, `/status.json`, health endpoints, the admin interface and app
-//! releases under stable per-app paths.
+//! The HTTP server: launcher, `/status.json`, health endpoints, sign-in (`/auth/`), the admin
+//! interface and app releases under stable per-app paths, all on one port.
 //!
 //! `/<entry>/` redirects (relative 302) to the active immutable release `/<entry>/<version>/`;
 //! tabs that loaded a release keep requesting files from it after an update.
@@ -14,12 +14,12 @@ use axum::http::{HeaderValue, Method, Response, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::routing::{get, post};
 
-use crate::access::AdminAuth;
 use crate::activity::Activity;
 use crate::admin::{self, Jobs};
 use crate::auth::{Sessions, Users, request_host};
 use crate::config::{AppConfig, Config};
 use crate::layout::{self, MARKER, valid_release_name};
+use crate::login;
 use crate::oidc::Oidc;
 use crate::serve::{CachePolicy, redirect, serve_dir, set_common_headers, simple};
 use crate::status;
@@ -40,12 +40,12 @@ pub struct Shared {
 impl Shared {
     pub fn new(cfg: Arc<Config>, activity: Arc<Activity>) -> Arc<Self> {
         let oidc = cfg
-            .admin
+            .auth
             .oidc
             .clone()
             .map(|o| Oidc::new(o, cfg.updater.http_timeout_secs));
         Arc::new(Self {
-            users: Users::new(cfg.admin.users_file.clone()),
+            users: Users::new(cfg.auth.users_file.clone()),
             sessions: Sessions::default(),
             oidc,
             jobs: Jobs::default(),
@@ -183,8 +183,8 @@ async fn app_request(State(s): State<Arc<Shared>>, req: Request) -> Response<Bod
     }
 }
 
-/// With `[admin] host`, the admin interface lives only on that host name, and nothing else is
-/// served there, so it never shares a browser origin with the apps.
+/// /admin answers only when enabled. With `[admin] host`, it lives only on that host name and the
+/// apps are not served there; sign-in (`/auth/`) and `/healthz` work on every host.
 async fn host_gate(
     State(s): State<Arc<Shared>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -202,66 +202,44 @@ async fn host_gate(
                     && h.rsplit_once(':')
                         .is_some_and(|(name, _)| name == admin_host))
         });
-        if is_admin != on_admin_host && path != "/healthz" {
+        if is_admin != on_admin_host && path != "/healthz" && !path.starts_with("/auth/") {
             return simple(StatusCode::NOT_FOUND, "not found\n");
         }
     }
-    if is_admin && s.cfg.admin.auth == AdminAuth::Disabled {
+    if is_admin && !s.cfg.admin.enabled {
         return simple(StatusCode::NOT_FOUND, "not found\n");
     }
     next.run(req).await
 }
 
-fn admin_routes(r: Router<Arc<Shared>>) -> Router<Arc<Shared>> {
-    r.route("/admin", get(admin::root_redirect))
-        .route("/admin/", get(admin::index))
-        .route(
-            "/admin/login",
-            get(admin::login_page).post(admin::login_submit),
-        )
-        .route("/admin/logout", post(admin::logout))
-        .route("/admin/oidc/login", get(admin::oidc_login))
-        .route("/admin/oidc/callback", get(admin::oidc_callback))
-        .route("/admin/api/status", get(admin::api_status))
-        .route("/admin/api/apps/{app}/{action}", post(admin::api_action))
-        .route("/admin/{name}", get(admin::asset))
-}
-
-/// The main listener: launcher, status, health and apps, plus /admin unless it has its own
-/// listener (`[admin] listen`).
 pub fn router(shared: Arc<Shared>) -> Router {
-    let mut r = Router::new()
+    Router::new()
         .route("/", get(launcher))
         .route("/launcher/{*path}", get(launcher_asset))
         .route("/status.json", get(status_json))
         .route("/healthz", get(healthz))
-        .route("/readyz/{entry}", get(readyz));
-    if shared.cfg.admin.listen.is_none() {
-        r = admin_routes(r);
-    }
-    r.fallback(app_request)
+        .route("/readyz/{entry}", get(readyz))
+        .route(
+            "/auth/login",
+            get(login::login_page).post(login::login_submit),
+        )
+        .route("/auth/style.css", get(login::style))
+        .route("/auth/logout", post(login::logout))
+        .route("/auth/me", get(login::me))
+        .route("/auth/oidc/login", get(login::oidc_login))
+        .route("/auth/oidc/callback", get(login::oidc_callback))
+        .route("/admin", get(admin::root_redirect))
+        .route("/admin/", get(admin::index))
+        .route("/admin/api/status", get(admin::api_status))
+        .route("/admin/api/apps/{app}/{action}", post(admin::api_action))
+        .route("/admin/{name}", get(admin::asset))
+        .fallback(app_request)
+        .layer(middleware::from_fn_with_state(
+            shared.clone(),
+            login::apps_gate,
+        ))
         .layer(middleware::from_fn_with_state(shared.clone(), host_gate))
         .with_state(shared)
-}
-
-/// The dedicated admin listener: only /admin and /healthz, nothing an app could run on.
-pub fn admin_router(shared: Arc<Shared>) -> Router {
-    let r = Router::new()
-        .route("/", get(|| async { redirect(StatusCode::FOUND, "admin/") }))
-        .route("/healthz", get(healthz));
-    admin_routes(r)
-        .fallback(|| async { simple(StatusCode::NOT_FOUND, "not found\n") })
-        .layer(middleware::from_fn_with_state(shared.clone(), host_gate))
-        .with_state(shared)
-}
-
-async fn shutdown_signal() {
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .expect("signal handler");
-    tokio::select! {
-        _ = term.recv() => {}
-        _ = tokio::signal::ctrl_c() => {}
-    }
 }
 
 /// Serve until the process is stopped.
@@ -269,30 +247,26 @@ pub async fn serve(shared: Arc<Shared>) -> anyhow::Result<()> {
     let addr = shared.cfg.server.listen;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     log::info!("listening on http://{addr}");
-    let main = axum::serve(
-        listener,
-        router(shared.clone()).into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal());
-    match shared.cfg.admin.listen {
-        Some(admin_addr) if shared.cfg.admin.auth != AdminAuth::Disabled => {
-            let admin_listener = tokio::net::TcpListener::bind(admin_addr).await?;
-            log::info!("admin interface on http://{admin_addr}/admin/");
-            let admin = axum::serve(
-                admin_listener,
-                admin_router(shared).into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .with_graceful_shutdown(shutdown_signal());
-            tokio::try_join!(async { main.await }, async { admin.await })?;
-        }
-        _ => {
-            if let Some(h) = &shared.cfg.admin.host
-                && shared.cfg.admin.auth != AdminAuth::Disabled
-            {
-                log::info!("admin interface only on host {h}, path /admin/");
-            }
-            main.await?;
+    if shared.cfg.admin.enabled {
+        match &shared.cfg.admin.host {
+            Some(h) => log::info!("admin interface on host {h}, path /admin/"),
+            None => log::info!(
+                "admin interface at /admin/, on the apps' browser origin (set [admin] host to separate it; see docs/admin.md)"
+            ),
         }
     }
+    axum::serve(
+        listener,
+        router(shared).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("signal handler");
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = tokio::signal::ctrl_c() => {}
+        }
+    })
+    .await?;
     Ok(())
 }

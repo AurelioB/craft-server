@@ -130,8 +130,8 @@ pub fn run(cfg: Config) -> Result<()> {
         crate::layout::reconcile(&cfg, &updater.store)?;
         updater.store.beat("starting")?;
     }
-    if cfg.admin.auth == crate::access::AdminAuth::None {
-        log::warn!("admin interface is enabled without authentication ([admin] auth = \"none\")");
+    if cfg.admin.enabled && cfg.auth.method == crate::access::AuthMethod::None {
+        log::warn!("admin interface is enabled without sign-in ([auth] method = \"none\")");
     }
 
     let phase = Arc::new(Mutex::new(String::from("idle")));

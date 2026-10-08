@@ -1,5 +1,6 @@
 //! HTTP behaviour of the combined server: app routing and caching, hidden paths, compression,
-//! activity tracking, and every administration auth mode including CSRF and host isolation.
+//! activity tracking, sign-in with roles for the apps and /admin in every method, CSRF and host
+//! isolation.
 
 mod common;
 
@@ -47,63 +48,6 @@ fn start(e: &Env) -> Server {
         url: spawn(router(shared.clone())),
         shared,
     }
-}
-
-#[test]
-fn admin_listener_keeps_admin_and_apps_on_separate_ports() {
-    let gh = FakeGitHub::start();
-    let e = installed_env(
-        &gh,
-        "[admin]\nauth = \"none\"\nlisten = \"127.0.0.1:18999\"\n",
-    );
-    let shared = Shared::new(Arc::new(e.cfg.clone()), Arc::new(Activity::new()));
-    let apps = spawn(router(shared.clone()));
-    let admin = spawn(craft_host::server::admin_router(shared));
-    assert_eq!(
-        get(&format!("{apps}/admin/"), &[]).status,
-        404,
-        "no admin on the apps' port"
-    );
-    assert_eq!(get(&format!("{apps}/testcraft/"), &[]).status, 302);
-    assert_eq!(get(&format!("{admin}/admin/"), &[]).status, 200);
-    assert_eq!(
-        get(&format!("{admin}/"), &[]).header("location"),
-        Some("admin/")
-    );
-    for path in [
-        "/testcraft/",
-        "/testcraft/1.0.0/index.html",
-        "/status.json",
-        "/launcher/launcher.js",
-    ] {
-        assert_eq!(
-            get(&format!("{admin}{path}"), &[]).status,
-            404,
-            "{path} is not served on the admin port"
-        );
-    }
-    let page = get(&format!("{admin}/admin/"), &[]);
-    let csrf = page
-        .cookies()
-        .into_iter()
-        .find_map(|c| c.strip_prefix("craft_csrf=").map(str::to_string))
-        .unwrap();
-    let cookie = format!("craft_csrf={csrf}");
-    let from_apps = [
-        ("Cookie", cookie.as_str()),
-        ("X-Craft-CSRF", csrf.as_str()),
-        ("Origin", apps.as_str()),
-    ];
-    let r = request(
-        "POST",
-        &format!("{admin}/admin/api/apps/testcraft/check"),
-        &from_apps,
-        None,
-    );
-    assert_eq!(
-        r.status, 403,
-        "a request from the apps' origin (other port) is refused"
-    );
 }
 
 struct Resp {
@@ -196,7 +140,11 @@ fn installed_env(gh: &FakeGitHub, sections: &str) -> Env {
         release_zip(
             &e.root(),
             "1.0.0",
-            &[("big.js", big.as_bytes()), ("sw.js", b"self.x=1")],
+            &[
+                ("big.js", big.as_bytes()),
+                ("sw.js", b"self.x=1"),
+                ("app.webmanifest", br#"{"name":"TestCraft"}"#),
+            ],
         ),
         PublishOpts::default(),
     );
@@ -378,7 +326,7 @@ fn wait_idle(url: &str, headers: &[(&str, &str)]) -> serde_json::Value {
 #[test]
 fn unauthenticated_mode_still_requires_csrf_for_actions() {
     let gh = FakeGitHub::start();
-    let e = installed_env(&gh, "[admin]\nauth = \"none\"\nshared_origin = true\n");
+    let e = installed_env(&gh, "[admin]\nenabled = true\n");
     let s = start(&e);
     let u = &s.url;
     assert_eq!(
@@ -450,15 +398,19 @@ fn unauthenticated_mode_still_requires_csrf_for_actions() {
     );
 }
 
+fn write_users(e: &Env, lines: &[(&str, &str, &str)]) {
+    let text: String = lines
+        .iter()
+        .map(|(name, pw, role)| format!("{name}:{}:{role}\n", hash_password(pw).unwrap()))
+        .collect();
+    std::fs::write(e.cfg.auth.users_file.clone(), text).unwrap();
+}
+
 #[test]
-fn basic_auth_protects_pages_and_api() {
+fn basic_auth_protects_admin_by_role_and_leaves_public_apps_open() {
     let gh = FakeGitHub::start();
-    let e = installed_env(&gh, "[admin]\nauth = \"basic\"\nshared_origin = true\n");
-    std::fs::write(
-        e.cfg.admin.users_file.clone(),
-        format!("ana:{}\n", hash_password("s3cret").unwrap()),
-    )
-    .unwrap();
+    let e = installed_env(&gh, "[auth]\nmethod = \"basic\"\n[admin]\nenabled = true\n");
+    write_users(&e, &[("ana", "s3cret", "admin"), ("bo", "bo-pw", "user")]);
     let s = start(&e);
     let u = &s.url;
     let r = get(&format!("{u}/admin/"), &[]);
@@ -484,6 +436,16 @@ fn basic_auth_protects_pages_and_api() {
         (v["user"].as_str(), v["auth"].as_str()),
         (Some("ana"), Some("basic"))
     );
+    let user = format!("Basic {}", STANDARD.encode("bo:bo-pw"));
+    assert_eq!(
+        get(
+            &format!("{u}/admin/api/status"),
+            &[("Authorization", &user)]
+        )
+        .status,
+        403,
+        "the user role may not manage updates"
+    );
     assert_eq!(
         request(
             "POST",
@@ -494,63 +456,69 @@ fn basic_auth_protects_pages_and_api() {
         .status,
         401
     );
+    // [auth] apps defaults to public.
+    assert_eq!(get(&format!("{u}/testcraft/"), &[]).status, 302);
+    assert_eq!(get(&format!("{u}/status.json"), &[]).status, 200);
+}
+
+fn session_from(r: &Resp) -> String {
+    r.cookies()
+        .into_iter()
+        .find(|c| c.starts_with("craft_session="))
+        .expect("session cookie")
+}
+
+fn form_login(u: &str, user: &str, pw: &str, next: &str) -> Resp {
+    let body = format!("user={user}&password={pw}&next={next}");
+    request(
+        "POST",
+        &format!("{u}/auth/login"),
+        &[],
+        Some(("application/x-www-form-urlencoded", body.as_bytes())),
+    )
 }
 
 #[test]
 fn form_login_sessions_and_logout() {
     let gh = FakeGitHub::start();
-    let e = installed_env(&gh, "[admin]\nauth = \"form\"\nshared_origin = true\n");
-    std::fs::write(
-        e.cfg.admin.users_file.clone(),
-        format!("ana:{}\n", hash_password("s3cret").unwrap()),
-    )
-    .unwrap();
+    let e = installed_env(&gh, "[auth]\nmethod = \"form\"\n[admin]\nenabled = true\n");
+    write_users(&e, &[("ana", "s3cret", "admin")]);
     let s = start(&e);
     let u = &s.url;
     assert_eq!(
         get(&format!("{u}/admin/"), &[]).header("location"),
-        Some("login")
+        Some("../auth/login?next=admin%2F")
     );
     assert_eq!(get(&format!("{u}/admin/api/status"), &[]).status, 401);
-    assert!(
-        get(&format!("{u}/admin/login"), &[])
-            .text()
-            .contains("Sign in")
-    );
+    let login_page = get(&format!("{u}/auth/login"), &[]);
+    assert!(login_page.text().contains("Sign in"));
+    assert_eq!(get(&format!("{u}/auth/style.css"), &[]).status, 200);
 
-    let form = |pw: &str| format!("user=ana&password={pw}");
-    let bad = request(
-        "POST",
-        &format!("{u}/admin/login"),
-        &[],
-        Some(("application/x-www-form-urlencoded", form("x").as_bytes())),
-    );
+    let bad = form_login(u, "ana", "x", "admin%2F");
     assert_eq!(
         (bad.status, bad.header("location")),
-        (303, Some("login?failed=1"))
+        (303, Some("login?failed=1&next=admin%2F"))
     );
     assert!(bad.cookies().is_empty());
     let cross = request(
         "POST",
-        &format!("{u}/admin/login"),
+        &format!("{u}/auth/login"),
         &[("Origin", "https://evil.example")],
         Some((
             "application/x-www-form-urlencoded",
-            form("s3cret").as_bytes(),
+            b"user=ana&password=s3cret".as_slice(),
         )),
     );
     assert_eq!(cross.status, 403, "login CSRF");
-
-    let ok = request(
-        "POST",
-        &format!("{u}/admin/login"),
-        &[],
-        Some((
-            "application/x-www-form-urlencoded",
-            form("s3cret").as_bytes(),
-        )),
+    let offsite = form_login(u, "ana", "s3cret", "%2F%2Fevil.example%2F");
+    assert_eq!(
+        offsite.header("location"),
+        Some("../"),
+        "off-site targets fall back to the launcher"
     );
-    assert_eq!(ok.status, 303);
+
+    let ok = form_login(u, "ana", "s3cret", "admin%2F");
+    assert_eq!((ok.status, ok.header("location")), (303, Some("../admin/")));
     let set = ok
         .headers
         .iter()
@@ -559,14 +527,10 @@ fn form_login_sessions_and_logout() {
         .1
         .clone();
     assert!(
-        set.contains("HttpOnly") && set.contains("SameSite=Strict") && set.contains("Path=/admin"),
+        set.contains("HttpOnly") && set.contains("SameSite=Lax") && set.contains("Path=/;"),
         "{set}"
     );
-    let session = ok
-        .cookies()
-        .into_iter()
-        .find(|c| c.starts_with("craft_admin="))
-        .unwrap();
+    let session = session_from(&ok);
     let page = get(&format!("{u}/admin/"), &[("Cookie", &session)]);
     assert_eq!(page.status, 200);
     let csrf = csrf_from(&page);
@@ -578,10 +542,17 @@ fn form_login_sessions_and_logout() {
     assert_eq!(v["user"], "ana");
     assert_eq!(v["can_logout"], true);
 
+    let cross_out = request(
+        "POST",
+        &format!("{u}/auth/logout"),
+        &[("Cookie", &cookies), ("Origin", "https://evil.example")],
+        None,
+    );
+    assert_eq!(cross_out.status, 403, "cross-site logout");
     let out = request(
         "POST",
-        &format!("{u}/admin/logout"),
-        &[("Cookie", &cookies), ("X-Craft-CSRF", &csrf)],
+        &format!("{u}/auth/logout"),
+        &[("Cookie", &cookies)],
         None,
     );
     assert_eq!(out.status, 200);
@@ -593,11 +564,109 @@ fn form_login_sessions_and_logout() {
 }
 
 #[test]
-fn proxy_identities_only_from_trusted_peers_and_allowed_groups() {
+fn signed_in_apps_need_a_role_and_admin_needs_the_admin_role() {
+    let gh = FakeGitHub::start();
+    let e = installed_env(
+        &gh,
+        "[auth]\nmethod = \"form\"\napps = \"signed-in\"\n[admin]\nenabled = true\n",
+    );
+    write_users(&e, &[("ana", "s3cret", "admin"), ("bo", "bo-pw", "user")]);
+    let s = start(&e);
+    let u = &s.url;
+    let html = [("Accept", "text/html")];
+    let nav = [("Sec-Fetch-Mode", "navigate")];
+
+    // Page loads go to the sign-in page and come back; other requests get 401.
+    assert_eq!(
+        get(&format!("{u}/"), &html).header("location"),
+        Some("auth/login?next=")
+    );
+    let r = get(&format!("{u}/testcraft/1.0.0/index.html?x=1"), &nav);
+    assert_eq!(
+        (r.status, r.header("location")),
+        (
+            303,
+            Some("../../auth/login?next=testcraft%2F1.0.0%2Findex.html%3Fx%3D1")
+        )
+    );
+    assert_eq!(r.header("cache-control"), Some("no-store"));
+    assert_eq!(get(&format!("{u}/testcraft/1.0.0/big.js"), &[]).status, 401);
+    assert_eq!(get(&format!("{u}/status.json"), &[]).status, 401);
+    // Health, sign-in, the launcher's logos and fonts, and web app manifests (fetched without
+    // cookies) stay reachable; a missing manifest is 404, not 401.
+    for open in ["/healthz", "/auth/login", "/launcher/icons/photocraft.webp"] {
+        assert_eq!(get(&format!("{u}{open}"), &[]).status, 200, "{open}");
+    }
+    let manifest = get(&format!("{u}/testcraft/1.0.0/app.webmanifest"), &[]);
+    assert_eq!(manifest.status, 200);
+    assert!(manifest.text().contains("TestCraft"));
+    // Only real manifests: encoded lookalikes do not open other release files.
+    for lookalike in [
+        "big.js%3F.webmanifest",
+        "big.js%23.webmanifest",
+        "big.js%2F.webmanifest",
+    ] {
+        let r = get(&format!("{u}/testcraft/1.0.0/{lookalike}"), &[]);
+        assert_eq!(r.status, 404, "{lookalike}");
+        assert!(!r.text().contains("craft craft"), "{lookalike}");
+    }
+    assert_eq!(get(&format!("{u}/auth/me"), &[]).status, 401);
+
+    let user = session_from(&form_login(u, "bo", "bo-pw", "testcraft%2F"));
+    let as_user = [("Cookie", user.as_str())];
+    assert_eq!(get(&format!("{u}/testcraft/"), &as_user).status, 302);
+    assert_eq!(
+        get(&format!("{u}/testcraft/1.0.0/big.js"), &as_user).status,
+        200
+    );
+    assert_eq!(get(&format!("{u}/status.json"), &as_user).status, 200);
+    assert_eq!(get(&format!("{u}/"), &as_user).status, 200);
+    assert_eq!(get(&format!("{u}/admin/"), &as_user).status, 403);
+    assert_eq!(get(&format!("{u}/admin/api/status"), &as_user).status, 403);
+    let me: serde_json::Value =
+        serde_json::from_slice(&get(&format!("{u}/auth/me"), &as_user).body).unwrap();
+    assert_eq!(
+        (
+            me["user"].as_str(),
+            me["role"].as_str(),
+            me["admin_url"].is_null()
+        ),
+        (Some("bo"), Some("user"), true)
+    );
+
+    let admin = session_from(&form_login(u, "ana", "s3cret", ""));
+    let as_admin = [("Cookie", admin.as_str())];
+    assert_eq!(get(&format!("{u}/testcraft/"), &as_admin).status, 302);
+    assert_eq!(get(&format!("{u}/admin/"), &as_admin).status, 200);
+    let me: serde_json::Value =
+        serde_json::from_slice(&get(&format!("{u}/auth/me"), &as_admin).body).unwrap();
+    assert_eq!(
+        (
+            me["role"].as_str(),
+            me["admin_url"].as_str(),
+            me["can_logout"].as_bool()
+        ),
+        (Some("admin"), Some("admin/"), Some(true))
+    );
+
+    request("POST", &format!("{u}/auth/logout"), &as_user, None);
+    assert_eq!(
+        get(
+            &format!("{u}/testcraft/"),
+            &[("Cookie", user.as_str()), ("Accept", "text/html")]
+        )
+        .status,
+        303,
+        "signed out"
+    );
+}
+
+#[test]
+fn proxy_identities_only_from_trusted_peers_with_a_role() {
     let gh = FakeGitHub::start();
     let trusted = installed_env(
         &gh,
-        "[server]\ntrusted_proxies = [\"127.0.0.0/8\"]\n[admin]\nauth = \"proxy\"\nshared_origin = true\nallowed_groups = [\"craft-admins\"]\n",
+        "[server]\ntrusted_proxies = [\"127.0.0.0/8\"]\n[auth]\nmethod = \"proxy\"\nadmin_groups = [\"craft-admins\"]\nuser_groups = [\"craft-users\"]\napps = \"signed-in\"\n[admin]\nenabled = true\n",
     );
     let s = start(&trusted);
     let u = &s.url;
@@ -607,18 +676,15 @@ fn proxy_identities_only_from_trusted_peers_and_allowed_groups() {
         ("Remote-Groups", "users|craft-admins"),
     ];
     assert_eq!(get(&format!("{u}/admin/"), &member).status, 200);
-    assert_eq!(
-        get(
-            &format!("{u}/admin/"),
-            &[("Remote-User", "bob"), ("Remote-Groups", "users")]
-        )
-        .status,
-        403
-    );
+    let user = [("Remote-User", "bob"), ("Remote-Groups", "craft-users")];
+    assert_eq!(get(&format!("{u}/admin/"), &user).status, 403);
+    assert_eq!(get(&format!("{u}/testcraft/"), &user).status, 302);
+    let outsider = [("Remote-User", "cy"), ("Remote-Groups", "staff")];
+    assert_eq!(get(&format!("{u}/testcraft/"), &outsider).status, 403);
 
     let untrusted = installed_env(
         &gh,
-        "[server]\ntrusted_proxies = [\"10.0.0.0/8\"]\n[admin]\nauth = \"proxy\"\nshared_origin = true\n",
+        "[server]\ntrusted_proxies = [\"10.0.0.0/8\"]\n[auth]\nmethod = \"proxy\"\nadmin_groups = [\"craft-admins\"]\n[admin]\nenabled = true\n",
     );
     let s = start(&untrusted);
     assert_eq!(
@@ -633,7 +699,7 @@ fn admin_host_separates_the_admin_origin_from_the_apps() {
     let gh = FakeGitHub::start();
     let e = installed_env(
         &gh,
-        "[admin]\nauth = \"none\"\nhost = \"admin.example.net\"\n",
+        "[admin]\nenabled = true\nhost = \"admin.example.net\"\n",
     );
     let s = start(&e);
     let u = &s.url;
@@ -681,15 +747,19 @@ fn admin_host_separates_the_admin_origin_from_the_apps() {
         404
     );
     assert_eq!(get(&format!("{u}/testcraft/"), &[]).status, 302);
-    assert_eq!(
-        get(&format!("{u}/healthz"), &[("Host", "admin.example.net")]).status,
-        200
-    );
+    for host in ["admin.example.net", "apps.example.net"] {
+        assert_eq!(get(&format!("{u}/healthz"), &[("Host", host)]).status, 200);
+        assert_eq!(
+            get(&format!("{u}/auth/me"), &[("Host", host)]).status,
+            200,
+            "sign-in answers on every host"
+        );
+    }
 
     // Behind a trusted proxy the forwarded host decides; from other peers it is ignored.
     let behind = installed_env(
         &gh,
-        "[server]\ntrusted_proxies = [\"127.0.0.0/8\"]\n[admin]\nauth = \"none\"\nhost = \"admin.example.net\"\n",
+        "[server]\ntrusted_proxies = [\"127.0.0.0/8\"]\n[admin]\nenabled = true\nhost = \"admin.example.net\"\n",
     );
     let s = start(&behind);
     let fwd_admin = [("X-Forwarded-Host", "admin.example.net")];
@@ -708,7 +778,7 @@ fn admin_host_separates_the_admin_origin_from_the_apps() {
     );
     let direct = installed_env(
         &gh,
-        "[server]\ntrusted_proxies = [\"10.0.0.0/8\"]\n[admin]\nauth = \"none\"\nhost = \"admin.example.net\"\n",
+        "[server]\ntrusted_proxies = [\"10.0.0.0/8\"]\n[admin]\nenabled = true\nhost = \"admin.example.net\"\n",
     );
     let s = start(&direct);
     assert_eq!(
@@ -736,11 +806,11 @@ fn param<'a>(url: &'a str, name: &str) -> &'a str {
 }
 
 #[test]
-fn oidc_login_validates_state_nonce_and_authorization() {
+fn oidc_login_validates_state_nonce_and_maps_groups_to_roles() {
     let gh = FakeGitHub::start();
     let issuer = format!("{}/oidc", gh.url);
     let sections = format!(
-        "[admin]\nauth = \"oidc\"\nshared_origin = true\nallowed_groups = [\"craft-admins\"]\n[admin.oidc]\nissuer = \"{issuer}\"\nclient_id = \"craft\"\nredirect_url = \"https://apps.example.net/admin/oidc/callback\"\n"
+        "[auth]\nmethod = \"oidc\"\napps = \"signed-in\"\nadmin_groups = [\"craft-admins\"]\nuser_groups = [\"craft-users\"]\n[auth.oidc]\nissuer = \"{issuer}\"\nclient_id = \"craft\"\nredirect_url = \"https://apps.example.net/auth/oidc/callback\"\n[admin]\nenabled = true\n"
     );
     let e = installed_env(&gh, &sections);
     gh.put_route(
@@ -753,11 +823,15 @@ fn oidc_login_validates_state_nonce_and_authorization() {
     let u = &s.url;
     assert_eq!(
         get(&format!("{u}/admin/"), &[]).header("location"),
-        Some("oidc/login")
+        Some("../auth/oidc/login?next=admin%2F")
+    );
+    assert_eq!(
+        get(&format!("{u}/testcraft/"), &[("Accept", "text/html")]).header("location"),
+        Some("../auth/oidc/login?next=testcraft%2F")
     );
 
-    let login = |claims: &dyn Fn(&str) -> serde_json::Value| -> Resp {
-        let start = get(&format!("{u}/admin/oidc/login"), &[]);
+    let login = |next: &str, claims: &dyn Fn(&str) -> serde_json::Value| -> Resp {
+        let start = get(&format!("{u}/auth/oidc/login?next={next}"), &[]);
         assert_eq!(start.status, 303);
         let loc = start.header("location").unwrap().to_string();
         assert!(
@@ -775,21 +849,32 @@ fn oidc_login_validates_state_nonce_and_authorization() {
                 .to_string()
                 .into_bytes(),
         );
-        get(
-            &format!("{u}/admin/oidc/callback?code=abc&state={state}"),
-            &[],
-        )
+        let callback = format!("{u}/auth/oidc/callback?code=abc&state={state}");
+        let bound = start
+            .cookies()
+            .into_iter()
+            .find(|c| c.starts_with("craft_oidc_state="))
+            .expect("state cookie");
+        assert!(bound.ends_with(&state), "{bound}");
+        // The same callback in another browser (no state cookie) is refused: no login CSRF.
+        let elsewhere = get(&callback, &[]);
+        assert_eq!(elsewhere.status, 403);
+        assert!(elsewhere.cookies().is_empty());
+        get(&callback, &[("Cookie", bound.as_str())])
     };
     let exp = craft_host::timeutil::now_epoch() + 300;
-    let good = |nonce: &str| serde_json::json!({"iss": issuer, "aud": "craft", "exp": exp, "nonce": nonce, "preferred_username": "ana", "groups": ["craft-admins"]});
+    let iss = issuer.as_str();
+    let with_groups = |groups: serde_json::Value| move |nonce: &str| serde_json::json!({"iss": iss, "aud": "craft", "exp": exp, "nonce": nonce, "preferred_username": "ana", "groups": groups.clone()});
 
-    let ok = login(&good);
-    assert_eq!((ok.status, ok.header("location")), (303, Some("../")));
-    let session = ok
-        .cookies()
-        .into_iter()
-        .find(|c| c.starts_with("craft_admin="))
-        .unwrap();
+    let ok = login(
+        "admin%2F",
+        &with_groups(serde_json::json!(["craft-admins"])),
+    );
+    assert_eq!(
+        (ok.status, ok.header("location")),
+        (303, Some("../../admin/"))
+    );
+    let session = session_from(&ok);
     let v: serde_json::Value = serde_json::from_slice(
         &get(&format!("{u}/admin/api/status"), &[("Cookie", &session)]).body,
     )
@@ -799,21 +884,34 @@ fn oidc_login_validates_state_nonce_and_authorization() {
         (Some("ana"), Some("oidc"))
     );
 
-    let wrong_nonce = login(&|_n: &str| good("not-the-nonce"));
+    let user = login(
+        "testcraft%2F",
+        &with_groups(serde_json::json!(["craft-users"])),
+    );
+    assert_eq!(user.header("location"), Some("../../testcraft/"));
+    let user = session_from(&user);
+    assert_eq!(
+        get(&format!("{u}/testcraft/"), &[("Cookie", &user)]).status,
+        302
+    );
+    assert_eq!(
+        get(&format!("{u}/admin/api/status"), &[("Cookie", &user)]).status,
+        403
+    );
+
+    let good = with_groups(serde_json::json!(["craft-admins"]));
+    let wrong_nonce = login("", &|_n: &str| good("not-the-nonce"));
     assert_eq!(wrong_nonce.status, 403);
-    let not_admin = login(&|n: &str| {
-        let mut c = good(n);
-        c["groups"] = serde_json::json!(["users"]);
-        c
-    });
-    assert_eq!(not_admin.status, 403);
-    assert!(not_admin.cookies().is_empty());
+    let no_role = login("", &with_groups(serde_json::json!(["staff"])));
+    assert_eq!(no_role.status, 403);
+    assert!(no_role.cookies().is_empty());
     assert_eq!(
         get(
-            &format!("{u}/admin/oidc/callback?code=abc&state=forged"),
-            &[]
+            &format!("{u}/auth/oidc/callback?code=abc&state=forged"),
+            &[("Cookie", "craft_oidc_state=forged")]
         )
         .status,
-        403
+        403,
+        "state never issued by this server"
     );
 }

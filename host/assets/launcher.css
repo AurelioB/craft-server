@@ -103,6 +103,36 @@ a { color: inherit; }
 
 #summary { color: var(--muted); }
 
+.topbar-end {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+}
+
+.account {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  padding-left: 1.25rem;
+  border-left: 1px solid var(--line);
+}
+
+.account[hidden] { display: none; }
+.account a, .account button { color: var(--ink); text-decoration: none; }
+.account a:hover, .account button:hover { text-decoration: underline; }
+
+.account button {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
+@media (max-width: 40rem) { #summary { display: none; } }
+
 /* Hero */
 .hero { padding: clamp(3rem, 8vw, 6rem) 0 clamp(2rem, 5vw, 3.5rem); }
 .hero .hud-label { color: var(--muted); }

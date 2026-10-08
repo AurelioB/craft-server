@@ -17,7 +17,14 @@
         <img src="launcher/icons/artcraft.svg" alt="" width="26" height="22">
         <span class="font-display">Craft Apps</span>
       </a>
-      <span class="hud-label" id="summary">Self-hosted</span>
+      <div class="topbar-end">
+        <span class="hud-label" id="summary">Self-hosted</span>
+        <nav class="account hud-label" id="account" aria-label="Account" hidden>
+          <span id="account-name"></span>
+          <a id="account-admin" href="admin/" hidden>Admin</a>
+          <button type="button" id="account-logout" hidden>Sign out</button>
+        </nav>
+      </div>
     </div>
   </header>
 

@@ -19,7 +19,7 @@ Edit `.env` (copy `.env.example`). Host paths are bind-mount sources; container 
 
 | Setting | Container path | Access | Holds |
 | --- | --- | --- | --- |
-| `CONFIG_DIR` | `/config` | read-only | `config.toml`, admin users file, GitHub token, OIDC client secret |
+| `CONFIG_DIR` | `/config` | read-only | `config.toml`, users file, GitHub token, OIDC client secret |
 | `DATA_DIR` | `/srv/data` | read-write | releases (`releases/<app>/<version>`, `current` pointers), `.staging/` |
 | `STATE_DIR` | `/srv/state` | read-write | per-app state, history, lock, heartbeat |
 | `CACHE_DIR` | `/srv/cache` | read-write | verified release archives, API response cache |
@@ -66,7 +66,7 @@ docker compose exec host craft-host doctor     # includes GitHub and OIDC connec
 ```
 
 `doctor` exits non-zero on any `FAIL` and prints a preparation command for each problem. To
-enable the administration page, follow [admin.md](admin.md).
+enable the administration page or require sign-in for the apps, follow [admin.md](admin.md).
 
 ## HTTPS and the reverse proxy
 
@@ -85,9 +85,9 @@ trust:
 
 - Redirects are relative, so the site works under any host name and behind a path prefix.
 - List the proxy in `[server] trusted_proxies` so `X-Forwarded-Proto/-Host` are honoured (secure
-  cookies, admin host matching) and, with `[admin] auth = "proxy"`, its identity headers.
-- Give `/admin` its own host name (`[admin] host`, required when it is enabled), see
-  [admin.md](admin.md#browser-origin-isolation).
+  cookies, admin host matching) and, with `[auth] method = "proxy"`, its identity headers.
+- `/admin` is on the apps' port; optionally give it a host name of its own (`[admin] host`), see
+  [admin.md](admin.md#same-origin-as-the-apps).
 - Browser storage is per origin: a LAN name and a public name for the same server have separate
   app libraries. Pick one canonical host name per app.
 - `/healthz` (process alive) and `/readyz/<app>` (app installed) suit proxy health checks.
@@ -104,6 +104,10 @@ docker compose up -d
 
 Installed releases, state and cache are kept. Releases installed by earlier versions get their
 precompressed copies added in the background after the upgrade.
+
+Configurations that kept sign-in settings in `[admin]` (`auth`, `users_file`, `[admin.oidc]`, …)
+are rejected with a message per moved key; see
+[admin.md](admin.md#upgrading-from-admin-auth).
 
 ### From the two-service layout (web + updater)
 

@@ -16,6 +16,7 @@ pub mod github;
 pub mod glob;
 pub mod layout;
 pub mod logging;
+pub mod login;
 pub mod oidc;
 pub mod ops;
 pub mod precompress;

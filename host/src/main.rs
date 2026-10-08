@@ -57,7 +57,8 @@ enum Command {
     },
     /// Exit 0 if the server answers /healthz (container health check).
     Healthcheck,
-    /// Read a password from standard input and print an Argon2 hash for the admin users file.
+    /// Read a password from standard input and print an Argon2 hash for the users file
+    /// (lines `name:<hash>:admin` or `name:<hash>:user`).
     HashPassword,
 }
 

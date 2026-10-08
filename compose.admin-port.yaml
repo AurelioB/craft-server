@@ -1,7 +1,0 @@
-# Optional: publish the separate administration port used by [admin] listen = "0.0.0.0:8081".
-# Enable with COMPOSE_FILE=compose.yaml:compose.admin-port.yaml in .env (add compose.logs.yaml
-# too if used).
-services:
-  host:
-    ports:
-      - "${ADMIN_BIND_ADDRESS:-${BIND_ADDRESS:-0.0.0.0}}:${ADMIN_PORT:-8081}:8081"

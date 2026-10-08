@@ -1,4 +1,5 @@
-//! Listener and administration settings: `[server]`, `[admin]`, `[admin.oidc]`, `[admin.proxy]`.
+//! Listener, sign-in and administration settings: `[server]`, `[auth]` (with `[auth.oidc]` and
+//! `[auth.proxy]`) and `[admin]`.
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -68,10 +69,8 @@ impl ServerSettings {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AdminAuth {
-    /// No administration interface (default).
-    Disabled,
-    /// Anyone who can reach /admin may manage updates.
+pub enum AuthMethod {
+    /// Nobody signs in; every visitor counts as an administrator (only behind a protecting proxy).
     None,
     /// HTTP Basic authentication against the users file.
     Basic,
@@ -81,6 +80,56 @@ pub enum AdminAuth {
     Oidc,
     /// Identity from a header set by a trusted reverse proxy (forward auth).
     Proxy,
+}
+
+impl AuthMethod {
+    pub fn name(self) -> &'static str {
+        match self {
+            AuthMethod::None => "none",
+            AuthMethod::Basic => "basic",
+            AuthMethod::Form => "form",
+            AuthMethod::Oidc => "oidc",
+            AuthMethod::Proxy => "proxy",
+        }
+    }
+
+    /// Methods with a session the user can end.
+    pub fn has_sessions(self) -> bool {
+        matches!(self, AuthMethod::Form | AuthMethod::Oidc)
+    }
+}
+
+/// What a signed-in account may do. Administrators may also use the apps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Role {
+    User,
+    Admin,
+}
+
+impl Role {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "user" => Some(Role::User),
+            "admin" => Some(Role::Admin),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Role::User => "user",
+            Role::Admin => "admin",
+        }
+    }
+}
+
+/// Who may open the launcher and the apps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppsAccess {
+    /// Anyone who can reach the server (default).
+    Public,
+    /// Signed-in accounts with the user or admin role.
+    SignedIn,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,32 +156,43 @@ pub struct ProxyAuthSettings {
     pub groups_header: String,
 }
 
+/// `[auth]`: how people sign in and which role they get.
 #[derive(Debug, Clone)]
-pub struct AdminSettings {
-    pub auth: AdminAuth,
-    /// If set, /admin answers only for this host name, and apps are not served on it, so the
-    /// administration interface gets its own browser origin.
-    pub host: Option<String>,
-    /// Explicit opt-in to serving /admin on the apps' origin (no `host`).
-    pub shared_origin: bool,
-    /// Separate listener for /admin only (a different port is a different browser origin).
-    pub listen: Option<SocketAddr>,
+pub struct AuthSettings {
+    pub method: AuthMethod,
+    pub apps: AppsAccess,
     pub users_file: PathBuf,
     pub session_ttl_secs: u64,
     pub cookie_secure: CookieSecure,
-    /// For oidc and proxy: allowed user names / groups. Both empty = any authenticated user.
-    pub allowed_users: Vec<String>,
-    pub allowed_groups: Vec<String>,
+    /// For oidc and proxy: accounts and groups with the admin role.
+    pub admin_users: Vec<String>,
+    pub admin_groups: Vec<String>,
+    /// For oidc and proxy: groups with the user role; empty = every signed-in account.
+    pub user_groups: Vec<String>,
     pub oidc: Option<OidcSettings>,
     pub proxy: ProxyAuthSettings,
 }
 
-impl AdminSettings {
-    pub fn allows(&self, user: &str, groups: &[String]) -> bool {
-        (self.allowed_users.is_empty() && self.allowed_groups.is_empty())
-            || self.allowed_users.iter().any(|u| u == user)
-            || groups.iter().any(|g| self.allowed_groups.contains(g))
+impl AuthSettings {
+    /// Role of an identity from OIDC or a trusted proxy; None = no access at all.
+    pub fn role_for(&self, user: &str, groups: &[String]) -> Option<Role> {
+        let in_any = |list: &[String]| groups.iter().any(|g| list.contains(g));
+        if self.admin_users.iter().any(|u| u == user) || in_any(&self.admin_groups) {
+            Some(Role::Admin)
+        } else if self.user_groups.is_empty() || in_any(&self.user_groups) {
+            Some(Role::User)
+        } else {
+            None
+        }
     }
+}
+
+/// `[admin]`: the administration interface under /admin on the apps' port.
+#[derive(Debug, Clone)]
+pub struct AdminSettings {
+    pub enabled: bool,
+    /// If set, /admin answers only for this host name, and apps are not served on it.
+    pub host: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -144,18 +204,24 @@ pub(crate) struct RawServer {
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawAdmin {
-    auth: Option<String>,
-    host: Option<String>,
-    shared_origin: Option<bool>,
-    listen: Option<String>,
+pub(crate) struct RawAuth {
+    method: Option<String>,
+    apps: Option<String>,
     users_file: Option<String>,
     session_ttl: Option<crate::config::Quantity>,
     cookie_secure: Option<String>,
-    allowed_users: Option<Vec<String>>,
-    allowed_groups: Option<Vec<String>>,
+    admin_users: Option<Vec<String>>,
+    admin_groups: Option<Vec<String>>,
+    user_groups: Option<Vec<String>>,
     oidc: Option<RawOidc>,
     proxy: Option<RawProxy>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawAdmin {
+    enabled: Option<bool>,
+    host: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -227,26 +293,7 @@ pub(crate) fn build_server(raw: RawServer, problems: &mut Vec<String>) -> Server
     }
 }
 
-pub(crate) fn build_admin(
-    raw: RawAdmin,
-    config_dir: &Path,
-    server: &ServerSettings,
-    problems: &mut Vec<String>,
-) -> AdminSettings {
-    let auth = match raw.auth.as_deref().unwrap_or("disabled") {
-        "disabled" => AdminAuth::Disabled,
-        "none" => AdminAuth::None,
-        "basic" => AdminAuth::Basic,
-        "form" => AdminAuth::Form,
-        "oidc" => AdminAuth::Oidc,
-        "proxy" => AdminAuth::Proxy,
-        other => {
-            problems.push(format!(
-                "[admin] auth: {other:?} is not one of disabled, none, basic, form, oidc, proxy"
-            ));
-            AdminAuth::Disabled
-        }
-    };
+pub(crate) fn build_admin(raw: RawAdmin, problems: &mut Vec<String>) -> AdminSettings {
     let host = raw
         .host
         .map(|h| h.trim().to_ascii_lowercase())
@@ -256,32 +303,45 @@ pub(crate) fn build_admin(
     {
         problems.push(format!("[admin] host: {h:?} must be a host name such as \"admin.example.net\" (optionally with :port)"));
     }
-    let shared_origin = raw.shared_origin.unwrap_or(false);
-    let listen =
-        raw.listen
-            .filter(|l| !l.trim().is_empty())
-            .and_then(|l| match l.parse::<SocketAddr>() {
-                Ok(a) => Some(a),
-                Err(_) => {
-                    problems.push(format!(
-                        "[admin] listen: {l:?} is not an address:port such as \"0.0.0.0:8081\""
-                    ));
-                    None
-                }
-            });
-    if let Some(a) = listen
-        && a.port() == server.listen.port()
-    {
-        problems.push("[admin] listen: must use a different port than [server] listen".into());
+    AdminSettings {
+        enabled: raw.enabled.unwrap_or(false),
+        host,
     }
-    if listen.is_some() && host.is_some() {
-        problems.push("[admin] listen and host are alternatives; set only one".into());
-    }
-    if auth != AdminAuth::Disabled && host.is_none() && listen.is_none() && !shared_origin {
+}
+
+pub(crate) fn build_auth(
+    raw: RawAuth,
+    config_dir: &Path,
+    server: &ServerSettings,
+    admin: &AdminSettings,
+    problems: &mut Vec<String>,
+) -> AuthSettings {
+    let method = match raw.method.as_deref().unwrap_or("none") {
+        "none" => AuthMethod::None,
+        "basic" => AuthMethod::Basic,
+        "form" => AuthMethod::Form,
+        "oidc" => AuthMethod::Oidc,
+        "proxy" => AuthMethod::Proxy,
+        other => {
+            problems.push(format!(
+                "[auth] method: {other:?} is not one of none, basic, form, oidc, proxy"
+            ));
+            AuthMethod::None
+        }
+    };
+    let apps = match raw.apps.as_deref().unwrap_or("public") {
+        "public" => AppsAccess::Public,
+        "signed-in" => AppsAccess::SignedIn,
+        other => {
+            problems.push(format!(
+                "[auth] apps: {other:?} is not one of public, signed-in"
+            ));
+            AppsAccess::Public
+        }
+    };
+    if apps == AppsAccess::SignedIn && method == AuthMethod::None {
         problems.push(
-            "[admin] host or listen: required when the admin interface is enabled, so app code never runs on the admin origin; \
-             set a dedicated host name or port, or set shared_origin = true to accept that risk"
-                .into(),
+            "[auth] apps = \"signed-in\" needs a sign-in method: set [auth] method to basic, form, oidc or proxy".into(),
         );
     }
     let cookie_secure = match raw.cookie_secure.as_deref().unwrap_or("auto") {
@@ -290,15 +350,15 @@ pub(crate) fn build_admin(
         "never" => CookieSecure::Never,
         other => {
             problems.push(format!(
-                "[admin] cookie_secure: {other:?} is not one of auto, always, never"
+                "[auth] cookie_secure: {other:?} is not one of auto, always, never"
             ));
             CookieSecure::Auto
         }
     };
     let session_ttl_secs =
-        crate::config::parse_duration(raw.session_ttl, "[admin] session_ttl", 12 * 3600, problems);
+        crate::config::parse_duration(raw.session_ttl, "[auth] session_ttl", 12 * 3600, problems);
     if session_ttl_secs < 60 {
-        problems.push("[admin] session_ttl: must be at least 1 minute".into());
+        problems.push("[auth] session_ttl: must be at least 1 minute".into());
     }
     let p = raw.proxy.unwrap_or_default();
     let proxy = ProxyAuthSettings {
@@ -310,11 +370,23 @@ pub(crate) fn build_admin(
         ("groups_header", &proxy.groups_header),
     ] {
         if !valid_header_name(h) {
-            problems.push(format!("[admin.proxy] {k}: {h:?} is not a header name"));
+            problems.push(format!("[auth.proxy] {k}: {h:?} is not a header name"));
         }
     }
-    if auth == AdminAuth::Proxy && server.trusted_proxies.is_empty() {
-        problems.push("[admin] auth = \"proxy\" needs [server] trusted_proxies, otherwise any client could claim an identity".into());
+    if method == AuthMethod::Proxy && server.trusted_proxies.is_empty() {
+        problems.push("[auth] method = \"proxy\" needs [server] trusted_proxies, otherwise any client could claim an identity".into());
+    }
+    let admin_users = raw.admin_users.unwrap_or_default();
+    let admin_groups = raw.admin_groups.unwrap_or_default();
+    if admin.enabled
+        && matches!(method, AuthMethod::Oidc | AuthMethod::Proxy)
+        && admin_users.is_empty()
+        && admin_groups.is_empty()
+    {
+        problems.push(format!(
+            "[auth] admin_groups or admin_users: required with method = \"{}\" while [admin] is enabled, so that only chosen accounts manage updates",
+            method.name()
+        ));
     }
     let oidc = raw.oidc.map(|o| OidcSettings {
         issuer: o
@@ -337,41 +409,43 @@ pub(crate) fn build_admin(
             .unwrap_or_else(|| "preferred_username".into()),
         groups_claim: o.groups_claim.unwrap_or_else(|| "groups".into()),
     });
-    if auth == AdminAuth::Oidc {
+    if method == AuthMethod::Oidc && admin.host.is_some() {
+        problems.push("[admin] host: cannot be combined with [auth] method = \"oidc\": sign-in completes on the single redirect_url host, so the admin host would never get a session".into());
+    }
+    if method == AuthMethod::Oidc {
         match &oidc {
-            None => problems.push("[admin] auth = \"oidc\" needs an [admin.oidc] section".into()),
+            None => problems.push("[auth] method = \"oidc\" needs an [auth.oidc] section".into()),
             Some(o) => {
                 if !o.issuer.starts_with("https://") && !o.issuer.starts_with("http://") {
-                    problems.push("[admin.oidc] issuer: must be the provider's issuer URL".into());
+                    problems.push("[auth.oidc] issuer: must be the provider's issuer URL".into());
                 }
                 if o.client_id.is_empty() {
-                    problems.push("[admin.oidc] client_id: required".into());
+                    problems.push("[auth.oidc] client_id: required".into());
                 }
-                if !o.redirect_url.ends_with("/admin/oidc/callback")
+                if !o.redirect_url.ends_with("/auth/oidc/callback")
                     || !(o.redirect_url.starts_with("https://")
                         || o.redirect_url.starts_with("http://"))
                 {
-                    problems.push("[admin.oidc] redirect_url: must be the public URL ending in /admin/oidc/callback".into());
+                    problems.push("[auth.oidc] redirect_url: must be the public URL ending in /auth/oidc/callback".into());
                 }
                 if !o.scopes.iter().any(|s| s == "openid") {
-                    problems.push("[admin.oidc] scopes: must include \"openid\"".into());
+                    problems.push("[auth.oidc] scopes: must include \"openid\"".into());
                 }
             }
         }
     }
-    AdminSettings {
-        auth,
-        host,
-        shared_origin,
-        listen,
+    AuthSettings {
+        method,
+        apps,
         users_file: config_path(
             config_dir,
-            &raw.users_file.unwrap_or_else(|| "admin-users".into()),
+            &raw.users_file.unwrap_or_else(|| "users".into()),
         ),
         session_ttl_secs,
         cookie_secure,
-        allowed_users: raw.allowed_users.unwrap_or_default(),
-        allowed_groups: raw.allowed_groups.unwrap_or_default(),
+        admin_users,
+        admin_groups,
+        user_groups: raw.user_groups.unwrap_or_default(),
         oidc,
         proxy,
     }
@@ -407,18 +481,32 @@ mod tests {
     }
 
     #[test]
-    fn allow_lists_accept_users_or_groups() {
-        let mut a = build_admin(
-            RawAdmin::default(),
+    fn roles_come_from_admin_lists_then_user_groups() {
+        let server = build_server(RawServer::default(), &mut vec![]);
+        let admin = build_admin(RawAdmin::default(), &mut vec![]);
+        let mut a = build_auth(
+            RawAuth::default(),
             Path::new("/config"),
-            &build_server(RawServer::default(), &mut vec![]),
+            &server,
+            &admin,
             &mut vec![],
         );
-        assert!(a.allows("anyone", &[]));
-        a.allowed_groups = vec!["craft-admins".into()];
-        assert!(!a.allows("anyone", &[]));
-        assert!(a.allows("anyone", &["craft-admins".into()]));
-        a.allowed_users = vec!["ana".into()];
-        assert!(a.allows("ana", &[]));
+        // No lists: every signed-in account is a user, nobody an admin.
+        assert_eq!(a.role_for("anyone", &[]), Some(Role::User));
+        a.admin_groups = vec!["craft-admins".into()];
+        a.admin_users = vec!["ana".into()];
+        assert_eq!(
+            a.role_for("bo", &["craft-admins".into()]),
+            Some(Role::Admin)
+        );
+        assert_eq!(a.role_for("ana", &[]), Some(Role::Admin));
+        a.user_groups = vec!["craft-users".into()];
+        assert_eq!(a.role_for("bo", &["craft-users".into()]), Some(Role::User));
+        assert_eq!(a.role_for("bo", &["staff".into()]), None);
+        // Admin membership wins even without a user group.
+        assert_eq!(
+            a.role_for("cy", &["craft-admins".into()]),
+            Some(Role::Admin)
+        );
     }
 }

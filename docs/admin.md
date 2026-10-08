@@ -1,4 +1,9 @@
-# Administration interface
+# Sign-in, roles and the administration interface
+
+Everything is served on one port: the launcher, the apps, sign-in under `/auth/` and the
+administration interface under `/admin/`.
+
+## Administration interface
 
 `/admin/` shows every enabled app with its active, latest and pending release, pin, blocked
 releases, activation policy, last check and last error, and offers:
@@ -16,54 +21,103 @@ Actions run one at a time in the background, under the same lock as scheduled up
 CLI; the page shows the running action, recent results and the update history. Every action is
 recorded with the signed-in user.
 
-The interface is **disabled by default** (`[admin] auth = "disabled"`; `/admin` answers 404).
+The interface is **disabled by default** (`/admin` answers 404). Enable it with:
 
-## Authentication modes
+```toml
+[auth]
+method = "form"          # how people sign in, see below
 
-Set `[admin] auth` in `config.toml`:
+[admin]
+enabled = true
+```
 
-| Mode | How it works | Use when |
+Only accounts with the **admin** role may open it; others get 403.
+
+> **Trust note.** On the apps' host name, `/admin` shares the apps' browser origin. If a
+> downloaded app release were malicious, its script could use a signed-in administrator's
+> session to run update actions. Admins who want to rule that out give `/admin` its own host name
+> on the same port, see [Same origin as the apps](#same-origin-as-the-apps).
+
+## Roles and protected apps
+
+| Role | Launcher and apps | `/admin` |
 | --- | --- | --- |
-| `none` | No authentication; every visitor of `/admin` is an administrator | Only behind a proxy that authenticates `/admin` itself |
-| `basic` | HTTP Basic against `users_file` (browser prompt) | Simple setups, scripted access |
-| `form` | Login page, session cookie, against `users_file` | Simple setups with a sign-out button |
-| `oidc` | OpenID Connect authorization-code flow with PKCE | An identity provider such as Authentik, Keycloak, Authelia |
-| `proxy` | User and groups from headers set by a trusted reverse proxy | Forward-auth setups (Authentik outpost, oauth2-proxy, Authelia) |
+| `user` | yes | no |
+| `admin` | yes | yes |
+
+The launcher and the apps are public by default. To require a signed-in account with either
+role:
+
+```toml
+[auth]
+apps = "signed-in"
+```
+
+A page load without a session (form, OIDC) goes to the sign-in page and returns to the requested
+page afterwards; other requests (scripts, images, `status.json`) get 401, Basic asks the browser
+for credentials, and proxy mode answers 403 without an identity. `/healthz`, `/readyz/…`,
+`/auth/…`, the launcher's logos and fonts, and apps' `*.webmanifest` files (browsers fetch them
+without cookies; they hold only the app's name, icons and colors) stay reachable. When signed
+in, the launcher shows the account, its role, a link to `/admin` for admins and a sign-out
+button.
+
+## Sign-in methods
+
+Set `[auth] method` in `config.toml`:
+
+| Method | How it works | Roles from |
+| --- | --- | --- |
+| `none` (default) | Nobody signs in; with `/admin` enabled every visitor is an administrator | — (only behind a proxy that authenticates `/admin` itself) |
+| `basic` | HTTP Basic against `users_file` (browser prompt) | users file |
+| `form` | Login page at `/auth/login`, session cookie, against `users_file` | users file |
+| `oidc` | OpenID Connect authorization-code flow with PKCE | groups claim |
+| `proxy` | User and groups from headers set by a trusted reverse proxy | groups header |
+
+`apps = "signed-in"` needs a method other than `none`.
 
 ### Users file (`basic`, `form`)
 
 ```sh
 docker compose exec -T host craft-host hash-password <<<'a long passphrase'
-# append "name:<hash>" to CONFIG_DIR/admin-users (or the path in [admin] users_file)
-chmod 0640 /srv/craft-apps/config/admin-users
+# append "name:<hash>:admin" or "name:<hash>:user" to CONFIG_DIR/users ([auth] users_file)
+chmod 0640 /srv/craft-apps/config/users
 ```
 
-Hashes are Argon2id. The file is re-read when it changes; removing a line revokes Basic access at
-once and blocks new form logins (existing sessions end at `session_ttl`, default 12 h, or at
-restart). Failed logins are logged and delayed.
+The role is the third field; a line without one gets `user`, a line with an unknown role is
+ignored and reported by `doctor`. Hashes are Argon2id. The file is re-read when it changes;
+removing a line revokes Basic access at once and blocks new form logins (existing sessions end at
+`session_ttl`, default 12 h, at sign-out, or at restart). Failed logins are logged and delayed.
 
 ### OpenID Connect
 
 ```toml
-[admin]
-auth = "oidc"
-allowed_groups = ["craft-admins"]       # or allowed_users; both empty = any authenticated user
+[auth]
+method = "oidc"
+apps = "signed-in"                  # optional
+admin_groups = ["craft-admins"]     # required while [admin] is enabled (or admin_users)
+user_groups = ["craft-users"]       # empty = every account the provider signs in
 
-[admin.oidc]
+[auth.oidc]
 issuer = "https://auth.example.net/application/o/craft-apps"
 client_id = "craft-apps"
 client_secret_file = "oidc-client-secret"   # in CONFIG_DIR; omit for a public client
-redirect_url = "https://admin.apps.example.net/admin/oidc/callback"
+redirect_url = "https://apps.example.net/auth/oidc/callback"
 ```
 
-Register `redirect_url` with the provider. The server reads the provider metadata from
+Roles: an account named in `admin_users` or in a group of `admin_groups` is an admin; otherwise
+it is a user if `user_groups` is empty or it is in one of those groups; otherwise sign-in is
+refused. In Authentik, for example, create the groups `craft-admins` and `craft-users` and assign
+people to them; its default `profile` scope mapping sends them in the `groups` claim.
+
+Register `redirect_url` with the provider; it must be the address people use, because the
+session cookie is set for that host. The server reads the provider metadata from
 `<issuer>/.well-known/openid-configuration`, sends the browser to the authorization endpoint with
-`state`, `nonce` and a PKCE S256 challenge, and exchanges the code at the token endpoint
-(client secret via HTTP Basic). It checks the ID token's issuer, audience, authorized party,
-expiry and nonce. The ID token comes straight from the token endpoint over verified TLS, which
-OpenID Connect Core §3.1.3.7 accepts in place of a signature check. Group membership comes from
-the `groups` claim (`groups_claim`), the user name from `preferred_username` (`username_claim`,
-falling back to `sub`).
+`state`, `nonce` and a PKCE S256 challenge, and exchanges the code at the token endpoint (client
+secret via HTTP Basic). It checks the ID token's issuer, audience, authorized party, expiry and
+nonce. The ID token comes straight from the token endpoint over verified TLS, which OpenID
+Connect Core §3.1.3.7 accepts in place of a signature check. Groups come from the `groups` claim
+(`groups_claim`), the user name from `preferred_username` (`username_claim`, falling back to
+`sub`). Roles are fixed at sign-in; group changes apply at the next sign-in.
 
 ### Trusted proxy (forward auth)
 
@@ -71,77 +125,74 @@ falling back to `sub`).
 [server]
 trusted_proxies = ["172.16.0.0/12"]   # addresses of your reverse proxy
 
-[admin]
-auth = "proxy"
-allowed_groups = ["craft-admins"]
+[auth]
+method = "proxy"
+admin_groups = ["craft-admins"]
+user_groups = ["craft-users"]
 
-[admin.proxy]
+[auth.proxy]
 user_header = "X-authentik-username"
 groups_header = "X-authentik-groups"  # '|' or ',' separated
 ```
 
-Identity headers are believed **only** from peers in `trusted_proxies`; a request from any other
-address gets 403 regardless of its headers. Make sure the proxy overwrites these headers and that
-the port is not reachable around it.
+Roles follow the same rules as OIDC, per request. Identity headers are believed **only** from
+peers in `trusted_proxies`; a request from any other address gets 403 regardless of its headers.
+Make sure the proxy overwrites these headers and that the port is not reachable around it.
 
-## Browser-origin isolation
+## Same origin as the apps
 
-App code is downloaded from upstream; if it were compromised, script running on the same origin
-as `/admin` could use an administrator's signed-in session (path-scoped cookies and CSRF tokens do
-not stop same-origin scripts). The interface therefore needs an origin of its own whenever it is
-enabled. Two ways:
+`/admin` normally shares the apps' browser origin (same host name and port). App code is
+downloaded from upstream; if a release were compromised, its script runs on that origin and could
+use a signed-in administrator's session to call the admin API (CSRF tokens and cookie paths do
+not stop same-origin scripts). Users without the admin role are not affected: the server refuses
+admin requests from their sessions.
 
-**A separate port** (no DNS needed, suits a homelab):
-
-```toml
-[admin]
-listen = "0.0.0.0:8081"
-```
-
-Publish it by adding `compose.admin-port.yaml` to `COMPOSE_FILE` in `.env` (`ADMIN_PORT`, default
-8081), then open `http://<server>:8081/admin/`. That listener serves only `/admin` and `/healthz`;
-the apps' port answers 404 for `/admin`.
-
-**A dedicated host name** routed to the same server:
+To keep administration out of the apps' origin while staying on the same port, give it a host
+name of its own that resolves to this server, for example a LAN DNS entry:
 
 ```toml
 [admin]
+enabled = true
 host = "admin.apps.example.net"
 ```
 
-`/admin` then answers only on that host, and nothing else (launcher, apps, status) is served
-there; on every other host name `/admin` answers 404. The name must resolve from the clients:
-`admin.localhost`, for example, only works in a browser on the server itself (browsers resolve
-`*.localhost` to their own loopback address). Behind a proxy
-listed in `[server] trusted_proxies`, `X-Forwarded-Host` decides; from other peers it is ignored.
-
-Cookies are not separated by port, and different ports or subdomains of one host are the same
-*site*. What keeps app pages away from admin actions is the browser's same-origin policy plus the
-server-side checks below: every action needs the CSRF header (which a cross-origin page cannot
-send without a CORS preflight the server never grants) and a matching `Origin`.
-
-With a separate port the host name is shared, so script on the apps' port can still set cookies
-that the admin port receives (for example a `craft_admin` or `craft_csrf` cookie with a narrower
-path). It cannot read the `HttpOnly` session cookie and cannot send an admin action, but it can
-disturb a session, e.g. sign an administrator out. Sibling host names behave alike, since
-`apps.example.net` may set cookies for `example.net`; only an admin host name under a different
-registrable domain avoids this.
+`/admin` then answers only on that host and the launcher, apps and status are not served there;
+on every other host name `/admin` answers 404. Sign-in (`/auth/`) works on both with `basic`,
+`form` and `proxy`, with a separate session per host name; `oidc` cannot be combined with
+`[admin] host`, because sign-in completes on the single `redirect_url` host. The name must
+resolve from the clients: `admin.localhost`, for example,
+only works in a browser on the server itself (browsers resolve `*.localhost` to their own
+loopback address). Behind a proxy listed in `[server] trusted_proxies`, `X-Forwarded-Host`
+decides; from other peers it is ignored. Sibling host names are still the same *site*:
+`apps.example.net` may set cookies for `example.net`, which could sign an administrator out but
+not read the `HttpOnly` session or send an admin action.
 
 None of this encrypts traffic. Over plain HTTP, passwords and session cookies cross the network
-readable by anyone on the path; before using real administrator credentials, put the admin
-address behind HTTPS (reverse proxy) or reach it only through a protected tunnel or VPN.
-
-Configuration is rejected when `auth` is enabled without `listen` or `host`, unless you opt in
-explicitly with `shared_origin = true`. `doctor` warns about that opt-in.
+readable by anyone on the path; before using real credentials, put the server behind HTTPS
+(reverse proxy) or reach it only through a protected tunnel or VPN.
 
 ## Request protections
 
-- Every action is a `POST` that must carry the `craft_csrf` cookie value in an `X-Craft-CSRF`
-  header (double submit); a browser `Origin` from another host is refused. This applies in every
-  mode, including `none`, Basic and proxy, where browsers attach credentials automatically.
-- Session and CSRF cookies are `SameSite=Strict` and scoped to `/admin`; the session cookie is
-  `HttpOnly`. `cookie_secure = "auto"` marks them `Secure` when the client used HTTPS according
-  to `X-Forwarded-Proto` from a trusted proxy; use `always` behind HTTPS proxies that are not
-  listed in `trusted_proxies`.
-- Admin pages are sent with `X-Frame-Options: DENY` and `Cache-Control: no-store`.
-- With `auth = "none"`, a warning is logged at startup and reported by `doctor`.
+- Every admin action is a `POST` that must carry the `craft_csrf` cookie value in an
+  `X-Craft-CSRF` header (double submit); a browser `Origin` from another host is refused. This
+  applies in every method, including `none`, Basic and proxy, where browsers attach credentials
+  automatically. Sign-in and sign-out refuse a foreign `Origin`.
+- The session cookie `craft_session` is `HttpOnly`, `SameSite=Lax` and scoped to `/`, so links to
+  an app from another site and the return from the identity provider keep the session. The CSRF
+  cookie is `SameSite=Strict` and scoped to `/admin`. `cookie_secure = "auto"` marks both
+  `Secure` when the client used HTTPS according to `X-Forwarded-Proto` from a trusted proxy; use
+  `always` behind HTTPS proxies that are not listed in `trusted_proxies`.
+- After sign-in the server only redirects to a path on this site (`next` targets such as
+  `//other.example` fall back to the launcher).
+- Admin and sign-in pages are sent with `X-Frame-Options: DENY` and `Cache-Control: no-store`.
+- With `method = "none"` and `/admin` enabled, a warning is logged at startup and reported by
+  `doctor`.
+
+## Upgrading from `[admin] auth`
+
+Older configurations kept sign-in settings in `[admin]`; they are rejected with a message naming
+each moved key. `[admin] auth` becomes `[auth] method` plus `[admin] enabled = true`;
+`users_file`, `session_ttl`, `cookie_secure`, `[admin.oidc]` and `[admin.proxy]` move to `[auth]`;
+`allowed_users`/`allowed_groups` become `admin_users`/`admin_groups`; `listen` and
+`shared_origin` are gone. Add `:admin` to the users-file lines of administrators, and register the
+new OIDC redirect URL ending in `/auth/oidc/callback`.

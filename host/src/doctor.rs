@@ -6,7 +6,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::access::AdminAuth;
+use crate::access::{AppsAccess, AuthMethod};
 use crate::config::{Config, ConfigError, Paths, load_config};
 use crate::fsutil::{current_umask, free_bytes, parse_umask, random_hex};
 
@@ -288,59 +288,83 @@ fn check_secret_file(r: &mut Report, what: &str, path: &Path) {
     }
 }
 
-fn check_admin(r: &mut Report, cfg: &Config, network: bool) {
-    let admin = &cfg.admin;
-    match admin.auth {
-        AdminAuth::Disabled => return r.ok("admin interface disabled ([admin] auth = \"disabled\")"),
-        AdminAuth::None => r.warn(
-            "admin interface has no authentication: anyone who reaches /admin can update, pin and roll back apps",
-            Some("only use this behind a proxy that authenticates /admin, or choose basic, form, oidc or proxy".into()),
-        ),
-        AdminAuth::Basic | AdminAuth::Form => {
-            check_secret_file(r, "admin users file", &admin.users_file);
-            let users = crate::auth::Users::new(admin.users_file.clone());
-            if users.is_empty() {
-                r.fail(
-                    format!("admin users file {} has no users", admin.users_file.display()),
-                    Some("add lines `name:<hash>`; create hashes with `craft-host hash-password`".into()),
+fn check_auth(r: &mut Report, cfg: &Config, network: bool) {
+    let (auth, admin) = (&cfg.auth, &cfg.admin);
+    let apps = match auth.apps {
+        AppsAccess::Public => "the launcher and apps are public",
+        AppsAccess::SignedIn => "the launcher and apps need a signed-in user or admin",
+    };
+    match (admin.enabled, &admin.host) {
+        (false, _) => r.ok(format!("admin interface disabled; {apps}")),
+        (true, Some(h)) => r.ok(format!("admin interface on host {h}; {apps}")),
+        (true, None) => r.ok(format!(
+            "admin interface at /admin/ on the apps' port and browser origin ([admin] host would separate it); {apps}"
+        )),
+    }
+    match auth.method {
+        AuthMethod::None => {
+            if admin.enabled {
+                r.warn(
+                    "[auth] method = \"none\": anyone who reaches /admin can update, pin and roll back apps",
+                    Some("only use this behind a proxy that authenticates /admin, or choose basic, form, oidc or proxy".into()),
                 );
             }
         }
-        AdminAuth::Oidc => {
-            if let Some(o) = &admin.oidc {
+        AuthMethod::Basic | AuthMethod::Form => {
+            check_secret_file(r, "users file", &auth.users_file);
+            let users = crate::auth::Users::new(auth.users_file.clone());
+            let bad = users.invalid_lines();
+            if !bad.is_empty() {
+                r.fail(
+                    format!("users file {}: lines {bad:?} are not `name:<hash>[:user|admin]`; they are ignored", auth.users_file.display()),
+                    None,
+                );
+            }
+            if users.is_empty() {
+                r.fail(
+                    format!("users file {} has no users", auth.users_file.display()),
+                    Some("add lines `name:<hash>:admin` or `name:<hash>:user`; create hashes with `craft-host hash-password`".into()),
+                );
+            } else if admin.enabled && !users.has_admin() {
+                r.warn(
+                    format!(
+                        "users file {} has no account with the admin role",
+                        auth.users_file.display()
+                    ),
+                    Some("end an account's line with `:admin`".into()),
+                );
+            }
+        }
+        AuthMethod::Oidc => {
+            if let Some(o) = &auth.oidc {
                 if o.client_secret_file.exists() {
                     check_secret_file(r, "OIDC client secret", &o.client_secret_file);
                 } else {
-                    r.warn("no OIDC client secret file; logging in as a public client (PKCE only)", None);
+                    r.warn(
+                        "no OIDC client secret file; logging in as a public client (PKCE only)",
+                        None,
+                    );
                 }
                 if network {
                     let oidc = crate::oidc::Oidc::new(o.clone(), cfg.updater.http_timeout_secs);
-                    match oidc.start() {
+                    match oidc.start(String::new()) {
                         Ok(_) => r.ok(format!("OIDC provider {} reachable", o.issuer)),
                         Err(e) => r.fail(format!("OIDC provider {}: {e:#}", o.issuer), None),
                     }
                 }
             }
         }
-        AdminAuth::Proxy => r.ok(format!(
-            "admin identities are taken from {} sent by {} trusted proxy network(s)",
-            admin.proxy.user_header,
+        AuthMethod::Proxy => r.ok(format!(
+            "identities are taken from {} sent by {} trusted proxy network(s)",
+            auth.proxy.user_header,
             cfg.server.trusted_proxies.len()
         )),
     }
-    if admin.allowed_users.is_empty()
-        && admin.allowed_groups.is_empty()
-        && matches!(admin.auth, AdminAuth::Oidc | AdminAuth::Proxy)
+    if matches!(auth.method, AuthMethod::Oidc | AuthMethod::Proxy)
+        && auth.user_groups.is_empty()
+        && auth.apps == AppsAccess::SignedIn
     {
-        r.warn("every authenticated user may manage updates; set [admin] allowed_users or allowed_groups", None);
-    }
-    match (&admin.host, admin.listen) {
-        (Some(h), _) => r.ok(format!("admin interface only on host {h}, separate from the apps' origin")),
-        (None, Some(a)) => r.ok(format!("admin interface only on its own listener {a}, separate from the apps' origin")),
-        (None, None) => r.warn(
-            "shared_origin = true: the admin interface shares a browser origin with the apps; code served by an app could use a signed-in admin session",
-            Some("set [admin] listen to a dedicated port (or host to a dedicated host name) and remove shared_origin".into()),
-        ),
+        r.ok("every account the identity provider signs in may use the apps ([auth] user_groups is empty)");
     }
 }
 
@@ -495,7 +519,7 @@ pub fn run(paths: Paths, network: bool) -> Report {
     if let Some(tp) = cfg.token_path() {
         check_secret_file(&mut r, "GitHub token file", &tp);
     }
-    check_admin(&mut r, &cfg, network);
+    check_auth(&mut r, &cfg, network);
 
     if network {
         let agent: ureq::Agent = ureq::Agent::config_builder()

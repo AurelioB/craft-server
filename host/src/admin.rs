@@ -1,5 +1,6 @@
-//! The `/admin` interface: authentication per `[admin] auth`, a status API and update actions
-//! (check, update, apply, pin, unpin, rollback, allow) run one at a time in the background.
+//! The `/admin` interface for accounts with the admin role (see `login.rs` for sign-in): a status
+//! API and update actions (check, update, apply, pin, unpin, rollback, allow) run one at a time in
+//! the background.
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -8,17 +9,15 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::body::Body;
-use axum::extract::{ConnectInfo, Form, Path, Query, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode, header};
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 
-use crate::access::AdminAuth;
-use crate::auth::{
-    CSRF_COOKIE, Principal, SESSION_COOKIE, basic_credentials, client_is_https, cookie,
-    cookie_secure, csrf_ok, proxy_identity, request_host, set_cookie,
-};
+use crate::access::Role;
+use crate::auth::{CSRF_COOKIE, Principal, cookie, cookie_secure, csrf_cookie, csrf_ok};
 use crate::fsutil::random_hex;
+use crate::login::{Ctx, Denied, authenticate, ctx, denied_page};
 use crate::ops::{Outcome, Updater};
 use crate::serve::{redirect, set_common_headers, simple};
 use crate::server::Shared;
@@ -28,7 +27,6 @@ use crate::timeutil::now_iso;
 
 const ADMIN_HTML: &str = include_str!("../assets/admin.html");
 const ADMIN_JS: &str = include_str!("../assets/admin.js");
-const LOGIN_HTML: &str = include_str!("../assets/login.html");
 const ADMIN_CSS: &str = include_str!("../assets/admin.css");
 const MAX_RESULTS: usize = 20;
 
@@ -74,97 +72,35 @@ fn json_error(status: StatusCode, message: &str) -> Response<Body> {
     res
 }
 
-struct Ctx {
-    peer: std::net::IpAddr,
-    host: Option<String>,
-    https: bool,
-}
-
-fn ctx(s: &Shared, headers: &HeaderMap, peer: SocketAddr) -> Ctx {
-    Ctx {
-        peer: peer.ip(),
-        host: request_host(headers, peer.ip(), &s.cfg.server),
-        https: client_is_https(headers, peer.ip(), &s.cfg.server),
+/// The signed-in administrator, or why not.
+fn authorize(s: &Shared, headers: &HeaderMap, c: &Ctx) -> Result<Principal, Denied> {
+    let p = authenticate(s, headers, c)?;
+    if p.role == Role::Admin {
+        Ok(p)
+    } else {
+        Err(Denied::Forbidden("this account may not manage updates"))
     }
 }
 
-enum Denied {
-    NotFound,
-    Login,
-    Challenge,
-    Forbidden(&'static str),
-}
-
-fn authenticate(s: &Shared, headers: &HeaderMap, c: &Ctx) -> Result<Principal, Denied> {
-    let admin = &s.cfg.admin;
-    match admin.auth {
-        AdminAuth::Disabled => Err(Denied::NotFound),
-        AdminAuth::None => Ok(Principal {
-            user: "anonymous".into(),
-            method: "none",
-        }),
-        AdminAuth::Basic => match basic_credentials(headers) {
-            Some((u, p)) if s.users.verify(&u, &p) => Ok(Principal {
-                user: u,
-                method: "basic",
-            }),
-            _ => Err(Denied::Challenge),
-        },
-        AdminAuth::Form | AdminAuth::Oidc => cookie(headers, SESSION_COOKIE)
-            .and_then(|t| s.sessions.get(&t))
-            .ok_or(Denied::Login),
-        AdminAuth::Proxy => match proxy_identity(headers, c.peer, &s.cfg.server, admin) {
-            Some((u, g)) if admin.allows(&u, &g) => Ok(Principal {
-                user: u,
-                method: "proxy",
-            }),
-            Some(_) => Err(Denied::Forbidden("this account may not manage updates")),
-            None => Err(Denied::Forbidden("no identity from a trusted proxy")),
-        },
-    }
-}
-
-fn denied_page(s: &Shared, d: Denied) -> Response<Body> {
+fn denied_api(d: Denied) -> Response<Body> {
     match d {
-        Denied::NotFound => simple(StatusCode::NOT_FOUND, "not found\n"),
-        Denied::Login => redirect(
-            StatusCode::SEE_OTHER,
-            if s.cfg.admin.auth == AdminAuth::Oidc {
-                "oidc/login"
-            } else {
-                "login"
-            },
-        ),
-        Denied::Challenge => {
-            let mut r = simple(StatusCode::UNAUTHORIZED, "authentication required\n");
-            r.headers_mut().insert(
-                header::WWW_AUTHENTICATE,
-                HeaderValue::from_static("Basic realm=\"Craft Apps admin\", charset=\"UTF-8\""),
-            );
-            r
-        }
-        Denied::Forbidden(m) => {
-            let mut r = simple(StatusCode::FORBIDDEN, "forbidden\n");
-            *r.body_mut() = Body::from(format!("forbidden: {m}\n"));
-            r
-        }
-    }
-}
-
-fn denied_api(s: &Shared, d: Denied) -> Response<Body> {
-    match d {
-        Denied::Challenge => denied_page(s, Denied::Challenge),
-        Denied::NotFound => json_error(StatusCode::NOT_FOUND, "not found"),
+        Denied::Challenge => denied_page_basic(),
         Denied::Login => json_error(StatusCode::UNAUTHORIZED, "login required"),
         Denied::Forbidden(m) => json_error(StatusCode::FORBIDDEN, m),
     }
 }
 
+fn denied_page_basic() -> Response<Body> {
+    let mut r = simple(StatusCode::UNAUTHORIZED, "authentication required\n");
+    r.headers_mut().insert(
+        header::WWW_AUTHENTICATE,
+        HeaderValue::from_static("Basic realm=\"Craft Apps\", charset=\"UTF-8\""),
+    );
+    r
+}
+
 /// `/admin` without a trailing slash.
-pub async fn root_redirect(State(s): State<Arc<Shared>>) -> Response<Body> {
-    if s.cfg.admin.auth == AdminAuth::Disabled {
-        return simple(StatusCode::NOT_FOUND, "not found\n");
-    }
+pub async fn root_redirect() -> Response<Body> {
     redirect(StatusCode::MOVED_PERMANENTLY, "admin/")
 }
 
@@ -174,19 +110,13 @@ pub async fn index(
     headers: HeaderMap,
 ) -> Response<Body> {
     let c = ctx(&s, &headers, peer);
-    if let Err(d) = authenticate(&s, &headers, &c) {
-        return denied_page(&s, d);
+    if let Err(d) = authorize(&s, &headers, &c) {
+        return denied_page(&s, d, "/admin/", None);
     }
     let mut res = page(ADMIN_HTML, "text/html; charset=utf-8");
     if cookie(&headers, CSRF_COOKIE).is_none_or(|v| v.len() < 32) {
-        let secure = cookie_secure(&s.cfg.admin, c.https);
-        if let Ok(v) = HeaderValue::from_str(&set_cookie(
-            CSRF_COOKIE,
-            &random_hex(32),
-            None,
-            false,
-            secure,
-        )) {
+        let secure = cookie_secure(&s.cfg.auth, c.https);
+        if let Ok(v) = HeaderValue::from_str(&csrf_cookie(&random_hex(32), secure)) {
             res.headers_mut().append(header::SET_COOKIE, v);
         }
     }
@@ -199,167 +129,6 @@ pub async fn asset(Path(name): Path<String>) -> Response<Body> {
         "admin.css" => page(ADMIN_CSS, "text/css; charset=utf-8"),
         _ => simple(StatusCode::NOT_FOUND, "not found\n"),
     }
-}
-
-pub async fn login_page(State(s): State<Arc<Shared>>) -> Response<Body> {
-    if s.cfg.admin.auth != AdminAuth::Form {
-        return simple(StatusCode::NOT_FOUND, "not found\n");
-    }
-    page(LOGIN_HTML, "text/html; charset=utf-8")
-}
-
-#[derive(Deserialize)]
-pub struct LoginForm {
-    user: String,
-    password: String,
-}
-
-fn same_origin(headers: &HeaderMap, c: &Ctx) -> bool {
-    match (headers.get("origin").and_then(|v| v.to_str().ok()), &c.host) {
-        (Some(o), Some(h)) => o
-            .split("://")
-            .nth(1)
-            .is_some_and(|o| o.eq_ignore_ascii_case(h)),
-        (Some(_), None) => false,
-        (None, _) => true,
-    }
-}
-
-fn session_cookie(s: &Shared, c: &Ctx, token: &str, max_age: u64) -> HeaderValue {
-    HeaderValue::from_str(&set_cookie(
-        SESSION_COOKIE,
-        token,
-        Some(max_age),
-        true,
-        cookie_secure(&s.cfg.admin, c.https),
-    ))
-    .expect("cookie is ASCII")
-}
-
-pub async fn login_submit(
-    State(s): State<Arc<Shared>>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    Form(form): Form<LoginForm>,
-) -> Response<Body> {
-    if s.cfg.admin.auth != AdminAuth::Form {
-        return simple(StatusCode::NOT_FOUND, "not found\n");
-    }
-    let c = ctx(&s, &headers, peer);
-    if !same_origin(&headers, &c) {
-        return simple(StatusCode::FORBIDDEN, "forbidden: cross-site login\n");
-    }
-    let shared = s.clone();
-    let (user, password) = (form.user.clone(), form.password);
-    let ok = tokio::task::spawn_blocking(move || shared.users.verify(&user, &password))
-        .await
-        .unwrap_or(false);
-    if !ok {
-        log::warn!("admin: failed login for {:?} from {}", form.user, c.peer);
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        return redirect(StatusCode::SEE_OTHER, "login?failed=1");
-    }
-    log::info!("admin: {} logged in (form) from {}", form.user, c.peer);
-    let token = s
-        .sessions
-        .create(&form.user, "form", s.cfg.admin.session_ttl_secs);
-    let mut res = redirect(StatusCode::SEE_OTHER, "./");
-    res.headers_mut().append(
-        header::SET_COOKIE,
-        session_cookie(&s, &c, &token, s.cfg.admin.session_ttl_secs),
-    );
-    res
-}
-
-pub async fn logout(
-    State(s): State<Arc<Shared>>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-) -> Response<Body> {
-    let c = ctx(&s, &headers, peer);
-    if !csrf_ok(&headers, c.host.as_deref()) {
-        return json_error(StatusCode::FORBIDDEN, "missing or invalid CSRF token");
-    }
-    if let Some(t) = cookie(&headers, SESSION_COOKIE) {
-        s.sessions.remove(&t);
-    }
-    let mut res = json_error(StatusCode::OK, "logged out");
-    res.headers_mut()
-        .append(header::SET_COOKIE, session_cookie(&s, &c, "", 0));
-    res
-}
-
-pub async fn oidc_login(State(s): State<Arc<Shared>>) -> Response<Body> {
-    if s.oidc.is_none() || s.cfg.admin.auth != AdminAuth::Oidc {
-        return simple(StatusCode::NOT_FOUND, "not found\n");
-    }
-    let shared = s.clone();
-    match tokio::task::spawn_blocking(move || shared.oidc.as_ref().map(|o| o.start())).await {
-        Ok(Some(Ok(url))) => redirect(StatusCode::SEE_OTHER, &url),
-        Ok(Some(Err(e))) => {
-            log::error!("admin: OIDC login cannot start: {e:#}");
-            simple(StatusCode::BAD_GATEWAY, "identity provider unavailable\n")
-        }
-        _ => simple(StatusCode::INTERNAL_SERVER_ERROR, "internal error\n"),
-    }
-}
-
-#[derive(Deserialize)]
-pub struct Callback {
-    code: Option<String>,
-    state: Option<String>,
-    error: Option<String>,
-}
-
-pub async fn oidc_callback(
-    State(s): State<Arc<Shared>>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    Query(q): Query<Callback>,
-) -> Response<Body> {
-    if s.cfg.admin.auth != AdminAuth::Oidc || s.oidc.is_none() {
-        return simple(StatusCode::NOT_FOUND, "not found\n");
-    }
-    let c = ctx(&s, &headers, peer);
-    let (Some(code), Some(state)) = (q.code, q.state) else {
-        log::warn!("admin: OIDC callback without code ({:?})", q.error);
-        return simple(
-            StatusCode::FORBIDDEN,
-            "forbidden: login was not completed\n",
-        );
-    };
-    let shared = s.clone();
-    let result =
-        tokio::task::spawn_blocking(move || shared.oidc.as_ref().map(|o| o.finish(&code, &state)))
-            .await;
-    let identity = match result {
-        Ok(Some(Ok(i))) => i,
-        Ok(Some(Err(e))) => {
-            log::warn!("admin: OIDC login rejected from {}: {e:#}", c.peer);
-            return simple(
-                StatusCode::FORBIDDEN,
-                "forbidden: login could not be verified\n",
-            );
-        }
-        _ => return simple(StatusCode::INTERNAL_SERVER_ERROR, "internal error\n"),
-    };
-    if !s.cfg.admin.allows(&identity.user, &identity.groups) {
-        log::warn!("admin: OIDC user {} is not allowed", identity.user);
-        return simple(
-            StatusCode::FORBIDDEN,
-            "forbidden: this account may not manage updates\n",
-        );
-    }
-    log::info!("admin: {} logged in (oidc) from {}", identity.user, c.peer);
-    let token = s
-        .sessions
-        .create(&identity.user, "oidc", s.cfg.admin.session_ttl_secs);
-    let mut res = redirect(StatusCode::SEE_OTHER, "../");
-    res.headers_mut().append(
-        header::SET_COOKIE,
-        session_cookie(&s, &c, &token, s.cfg.admin.session_ttl_secs),
-    );
-    res
 }
 
 #[derive(Serialize)]
@@ -379,9 +148,9 @@ pub async fn api_status(
     headers: HeaderMap,
 ) -> Response<Body> {
     let c = ctx(&s, &headers, peer);
-    let principal = match authenticate(&s, &headers, &c) {
+    let principal = match authorize(&s, &headers, &c) {
         Ok(p) => p,
-        Err(d) => return denied_api(&s, d),
+        Err(d) => return denied_api(d),
     };
     let shared = s.clone();
     let body = tokio::task::spawn_blocking(move || {
@@ -389,7 +158,7 @@ pub async fn api_status(
         AdminStatus {
             user: principal.user,
             auth: principal.method,
-            can_logout: matches!(shared.cfg.admin.auth, AdminAuth::Form | AdminAuth::Oidc),
+            can_logout: shared.cfg.auth.method.has_sessions(),
             running: shared.jobs.running.lock().clone(),
             results: shared.jobs.results.lock().iter().cloned().collect(),
             history: store.history(None, 40),
@@ -425,9 +194,9 @@ pub async fn api_action(
     body: Option<Json<ActionBody>>,
 ) -> Response<Body> {
     let c = ctx(&s, &headers, peer);
-    let principal = match authenticate(&s, &headers, &c) {
+    let principal = match authorize(&s, &headers, &c) {
         Ok(p) => p,
-        Err(d) => return denied_api(&s, d),
+        Err(d) => return denied_api(d),
     };
     if !csrf_ok(&headers, c.host.as_deref()) {
         return json_error(StatusCode::FORBIDDEN, "missing or invalid CSRF token");

@@ -136,7 +136,7 @@ async function load() {
 }
 
 $("logout").addEventListener("click", async () => {
-  await fetch("logout", { method: "POST", credentials: "same-origin", headers: { "X-Craft-CSRF": csrf() } });
+  await fetch("../auth/logout", { method: "POST", credentials: "same-origin" });
   location.href = "./";
 });
 

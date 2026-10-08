@@ -9,14 +9,15 @@ use regex::Regex;
 use serde::Deserialize;
 
 use crate::access::{
-    AdminSettings, RawAdmin, RawServer, ServerSettings, build_admin, build_server,
+    AdminSettings, AuthSettings, RawAdmin, RawAuth, RawServer, ServerSettings, build_admin,
+    build_auth, build_server,
 };
 use crate::version::parse_tag;
 
 pub const MANIFEST: &str = include_str!("manifest.toml");
 pub const STAGING_DIR: &str = ".staging";
 /// Paths the server answers itself; an app entry must not shadow them.
-pub const RESERVED_ENTRIES: &[&str] = &["admin", "launcher", "healthz", "readyz", "status"];
+pub const RESERVED_ENTRIES: &[&str] = &["admin", "auth", "launcher", "healthz", "readyz", "status"];
 
 #[derive(Debug)]
 pub struct ConfigError(pub Vec<String>);
@@ -210,6 +211,7 @@ pub struct Config {
     pub limits: Limits,
     pub retention: Retention,
     pub server: ServerSettings,
+    pub auth: AuthSettings,
     pub admin: AdminSettings,
     pub apps: Vec<AppConfig>,
     pub config_file_found: bool,
@@ -279,6 +281,7 @@ struct RawFile {
     limits: Option<RawLimits>,
     retention: Option<RawRetention>,
     server: Option<RawServer>,
+    auth: Option<RawAuth>,
     admin: Option<RawAdmin>,
     #[serde(default)]
     apps: toml::Table,
@@ -785,6 +788,39 @@ fn parse_apps_table(
     out
 }
 
+/// Sign-in settings moved from `[admin]` to `[auth]`; name them in the error so an older
+/// config.toml is easy to update (it is rejected either way, never read as "no sign-in").
+fn moved_admin_keys(text: &str) -> Vec<String> {
+    let Ok(table) = toml::from_str::<toml::Table>(text) else {
+        return vec![];
+    };
+    let Some(admin) = table.get("admin").and_then(|a| a.as_table()) else {
+        return vec![];
+    };
+    let mut hints = Vec::new();
+    for key in admin.keys() {
+        let hint = match key.as_str() {
+            "auth" => {
+                "[admin] auth: replaced by [auth] method (\"disabled\" becomes [admin] enabled = false)"
+            }
+            "users_file" | "session_ttl" | "cookie_secure" | "oidc" | "proxy" => {
+                "[admin] users_file, session_ttl, cookie_secure, oidc and proxy: moved to [auth] (and [auth.oidc], [auth.proxy]); OIDC redirect_url now ends in /auth/oidc/callback"
+            }
+            "allowed_users" | "allowed_groups" => {
+                "[admin] allowed_users/allowed_groups: replaced by [auth] admin_users/admin_groups"
+            }
+            "listen" | "shared_origin" => {
+                "[admin] listen/shared_origin: removed; /admin is served on the apps' port (optionally only for [admin] host)"
+            }
+            _ => continue,
+        };
+        if !hints.iter().any(|h: &String| h == hint) {
+            hints.push(hint.to_string());
+        }
+    }
+    hints
+}
+
 pub fn load_config(paths: Paths) -> Result<Config, ConfigError> {
     let mut problems = Vec::new();
     let manifest: RawFile = toml::from_str(MANIFEST).expect("built-in manifest is valid");
@@ -794,11 +830,10 @@ pub fn load_config(paths: Paths) -> Result<Config, ConfigError> {
         Ok(text) => match toml::from_str::<RawFile>(&text) {
             Ok(raw) => (raw, true),
             Err(e) => {
-                return Err(ConfigError(vec![format!(
-                    "{}: {}",
-                    paths.config_file.display(),
-                    e.message()
-                )]));
+                let mut problems =
+                    vec![format!("{}: {}", paths.config_file.display(), e.message())];
+                problems.extend(moved_admin_keys(&text));
+                return Err(ConfigError(problems));
             }
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (RawFile::default(), false),
@@ -993,10 +1028,12 @@ pub fn load_config(paths: Paths) -> Result<Config, ConfigError> {
     check_overlaps(&apps, &mut problems);
     check_roots(&paths, &mut problems);
     let server = build_server(raw.server.unwrap_or_default(), &mut problems);
-    let admin = build_admin(
-        raw.admin.unwrap_or_default(),
+    let admin = build_admin(raw.admin.unwrap_or_default(), &mut problems);
+    let auth = build_auth(
+        raw.auth.unwrap_or_default(),
         &paths.config_dir(),
         &server,
+        &admin,
         &mut problems,
     );
     if !problems.is_empty() {
@@ -1008,6 +1045,7 @@ pub fn load_config(paths: Paths) -> Result<Config, ConfigError> {
         limits,
         retention,
         server,
+        auth,
         admin,
         apps,
         config_file_found: found,
@@ -1122,9 +1160,10 @@ entry = "effectcraft"
     }
 
     #[test]
-    fn activation_and_admin_settings_are_validated() {
+    fn activation_auth_and_admin_settings_are_validated() {
+        use crate::access::{AppsAccess, AuthMethod};
         let cfg = load(
-            "[updater]\nactivation = \"idle\"\nidle_after = \"10m\"\n[apps.photocraft]\nactivation = \"immediate\"\n[admin]\nauth = \"form\"\nhost = \"Admin.Example.net\"\n",
+            "[updater]\nactivation = \"idle\"\nidle_after = \"10m\"\n[apps.photocraft]\nactivation = \"immediate\"\n[auth]\nmethod = \"form\"\napps = \"signed-in\"\n[admin]\nenabled = true\nhost = \"Admin.Example.net\"\n",
         )
         .unwrap();
         assert_eq!(cfg.app("vectorcraft").unwrap().activation, Activation::Idle);
@@ -1134,42 +1173,51 @@ entry = "effectcraft"
             Activation::Immediate
         );
         assert_eq!(cfg.admin.host.as_deref(), Some("admin.example.net"));
-        assert_eq!(cfg.admin.auth, crate::access::AdminAuth::Form);
+        assert_eq!(
+            (cfg.auth.method, cfg.auth.apps),
+            (AuthMethod::Form, AppsAccess::SignedIn)
+        );
+        // Same port, no host: the default.
+        assert!(load("[auth]\nmethod = \"basic\"\n[admin]\nenabled = true\n").is_ok());
+        // A half-migrated file with the old sign-in keys is rejected, never read as method none.
+        let all = load("[admin]\nenabled = true\nauth = \"form\"\nallowed_groups = [\"a\"]\n")
+            .unwrap_err()
+            .0
+            .join("\n");
+        assert!(
+            all.contains("replaced by [auth] method") && all.contains("admin_users/admin_groups"),
+            "{all}"
+        );
 
-        let all = load("[admin]\nauth = \"proxy\"\n")
+        let all = load("[auth]\nmethod = \"proxy\"\n[admin]\nenabled = true\n")
             .unwrap_err()
             .0
             .join("\n");
         assert!(all.contains("needs [server] trusted_proxies"), "{all}");
-        assert!(all.contains("[admin] host or listen: required"), "{all}");
-        let all =
-            load("[admin]\nauth = \"basic\"\nlisten = \"0.0.0.0:8080\"\nhost = \"a.example\"\n")
-                .unwrap_err()
-                .0
-                .join("\n");
         assert!(
-            all.contains("different port") && all.contains("set only one"),
+            all.contains("admin_groups or admin_users: required"),
             "{all}"
         );
-        assert_eq!(
-            load("[admin]\nauth = \"basic\"\nlisten = \"0.0.0.0:8081\"\n")
-                .unwrap()
-                .admin
-                .listen,
-            Some("0.0.0.0:8081".parse().unwrap())
-        );
-        load("[admin]\nauth = \"basic\"\nshared_origin = true\n")
-            .expect("explicit shared-origin opt-in");
-        let all = load("[admin]\nauth = \"oidc\"\n").unwrap_err().0.join("\n");
-        assert!(all.contains("needs an [admin.oidc] section"), "{all}");
-        let all = load("[admin]\nauth = \"oidc\"\n[admin.oidc]\nissuer = \"https://id.example.net\"\nredirect_url = \"https://x/elsewhere\"\n").unwrap_err().0.join("\n");
+        let all = load("[auth]\napps = \"signed-in\"\n")
+            .unwrap_err()
+            .0
+            .join("\n");
+        assert!(all.contains("needs a sign-in method"), "{all}");
+        let all = load("[auth]\nmethod = \"oidc\"\n[admin]\nhost = \"admin.example.net\"\n")
+            .unwrap_err()
+            .0
+            .join("\n");
+        assert!(all.contains("needs an [auth.oidc] section"), "{all}");
+        assert!(all.contains("cannot be combined"), "{all}");
+        let all = load("[auth]\nmethod = \"oidc\"\n[auth.oidc]\nissuer = \"https://id.example.net\"\nredirect_url = \"https://x/admin/oidc/callback\"\n").unwrap_err().0.join("\n");
         assert!(
-            all.contains("client_id: required") && all.contains("redirect_url"),
+            all.contains("client_id: required") && all.contains("/auth/oidc/callback"),
             "{all}"
         );
-        let all = load("[admin]\nauth = \"magic\"\n[server]\nlisten = \"nowhere\"\ntrusted_proxies = [\"10.0.0.0/99\"]\n").unwrap_err().0.join("\n");
+        let all = load("[auth]\nmethod = \"magic\"\napps = \"some\"\n[server]\nlisten = \"nowhere\"\ntrusted_proxies = [\"10.0.0.0/99\"]\n").unwrap_err().0.join("\n");
         assert!(
-            all.contains("[admin] auth")
+            all.contains("[auth] method")
+                && all.contains("[auth] apps")
                 && all.contains("[server] listen")
                 && all.contains("trusted_proxies"),
             "{all}"
