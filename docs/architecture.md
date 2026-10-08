@@ -4,7 +4,7 @@
 
 | Path | Contents |
 | --- | --- |
-| `compose.yaml`, `compose.logs.yaml` | The `host` service: identity, mounts, health check; optional log mount |
+| `compose.yaml`, `compose.logs.yaml`, `compose.admin-port.yaml` | The `host` service: identity, mounts, health check; optional log mount and admin port |
 | `host/` | Rust crate `craft-host` (server, updater, admin, CLI) and its `Dockerfile` |
 | `host/assets/` | Launcher, admin and login pages, compiled into the binary |
 | `host/src/manifest.toml` | Built-in application manifest, compiled into the binary |
@@ -71,9 +71,9 @@ sequenceDiagram
 - **Activation policy.** The plan asked to apply updates "when the app is not being used". The
   server only observes requests, so `idle` activation is a request-inactivity heuristic;
   versioned URLs make immediate activation safe for open tabs, which is why it is the default.
-- **Admin on the same port, separate origin.** `/admin` shares the listener but, when enabled,
-  requires its own host name (`[admin] host`) unless `shared_origin = true` explicitly accepts
-  that app code could act with an administrator's session.
+- **Admin on its own origin.** `/admin` is served by the same process but, when enabled, requires
+  a separate port (`[admin] listen`) or host name (`[admin] host`) unless `shared_origin = true`
+  explicitly accepts that app code could act with an administrator's session.
 - **LightCraft exclusions.** The manifest's `exclude` list removes the Cargo build directory that
   LightCraft 0.4.0 ships inside its web archive. Native executables anywhere else cause rejection.
   No application file is modified; precompressed copies are added alongside.

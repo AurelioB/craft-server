@@ -3,22 +3,48 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>Craft Apps</title>
+  <link rel="icon" href="launcher/icons/artcraft.svg" type="image/svg+xml">
+  <link rel="preload" href="launcher/fonts/archivo-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="launcher/launcher.css">
   <script type="module" src="launcher/launcher.js"></script>
 </head>
 <body>
-  <header>
-    <h1>Craft Apps</h1>
-    <p class="lede">Browser apps served from this host. They run on your computer: files you open stay in your browser and are not uploaded here.</p>
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <a class="brand" href="./">
+        <img src="launcher/icons/artcraft.svg" alt="" width="26" height="22">
+        <span class="font-display">Craft Apps</span>
+      </a>
+      <span class="hud-label" id="summary">Self-hosted</span>
+    </div>
   </header>
-  <div id="notices" role="status" aria-live="polite"></div>
-  <main id="apps" aria-busy="true">
-    <p class="muted">Loading app list…</p>
+
+  <main class="wrap">
+    <section class="hero">
+      <p class="hud-label">01 / Crafting apps</p>
+      <h1 class="font-display">Open-source creative apps, served from this host.</h1>
+      <p class="lede">They run entirely in your browser: files you open stay on your computer and are never uploaded here.</p>
+    </section>
+
+    <div id="notices" role="status" aria-live="polite"></div>
+
+    <section aria-labelledby="lineup-title">
+      <div class="section-head">
+        <h2 class="hud-label" id="lineup-title">02 / The lineup</h2>
+        <span class="hud-label faint" id="count"></span>
+      </div>
+      <div id="apps" class="grid" aria-busy="true">
+        <p class="placeholder">Loading app list…</p>
+      </div>
+    </section>
   </main>
-  <footer>
-    <p class="muted">Documents and browser libraries live in this browser for this address. Export or back them up from inside each app; a different host name starts with empty storage.</p>
-    <p class="muted" id="updated"></p>
+
+  <footer class="wrap footer">
+    <p>Documents and libraries live in this browser for this address. Export or back them up from inside each app; a different host name or port starts with empty storage.</p>
+    <p class="hud-label faint"><span id="updated"></span></p>
+    <p class="faint">Apps and logos by <a href="https://getartcraft.com/apps" rel="noopener">ArtCraft</a>. Fonts: Archivo and Geist Mono (SIL Open Font License).</p>
   </footer>
 </body>
 </html>

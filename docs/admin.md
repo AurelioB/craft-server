@@ -88,21 +88,43 @@ the port is not reachable around it.
 
 App code is downloaded from upstream; if it were compromised, script running on the same origin
 as `/admin` could use an administrator's signed-in session (path-scoped cookies and CSRF tokens do
-not stop same-origin scripts). The interface therefore needs its own host name whenever it is
-enabled:
+not stop same-origin scripts). The interface therefore needs an origin of its own whenever it is
+enabled. Two ways:
+
+**A separate port** (no DNS needed, suits a homelab):
+
+```toml
+[admin]
+listen = "0.0.0.0:8081"
+```
+
+Publish it by adding `compose.admin-port.yaml` to `COMPOSE_FILE` in `.env` (`ADMIN_PORT`, default
+8081), then open `http://<server>:8081/admin/`. That listener serves only `/admin` and `/healthz`;
+the apps' port answers 404 for `/admin`.
+
+**A dedicated host name** routed to the same server:
 
 ```toml
 [admin]
 host = "admin.apps.example.net"
 ```
 
-Route that name to the same server. `/admin` then answers only on that host, and nothing else
-(launcher, apps, status) is served there; on every other host name `/admin` answers 404. Behind a
-proxy listed in `[server] trusted_proxies`, `X-Forwarded-Host` decides; from other peers it is
-ignored.
+`/admin` then answers only on that host, and nothing else (launcher, apps, status) is served
+there; on every other host name `/admin` answers 404. The name must resolve from the clients:
+`admin.localhost`, for example, only works in a browser on the server itself. Behind a proxy
+listed in `[server] trusted_proxies`, `X-Forwarded-Host` decides; from other peers it is ignored.
 
-Configuration is rejected when `auth` is enabled without `host`, unless you opt in explicitly with
-`shared_origin = true` (for example for a LAN-only setup). `doctor` warns about that opt-in.
+Cookies are not separated by port, and different ports or subdomains of one host are the same
+*site*. What keeps app pages away from admin actions is the browser's same-origin policy plus the
+server-side checks below: every action needs the CSRF header (which a cross-origin page cannot
+send without a CORS preflight the server never grants) and a matching `Origin`.
+
+None of this encrypts traffic. Over plain HTTP, passwords and session cookies cross the network
+readable by anyone on the path; before using real administrator credentials, put the admin
+address behind HTTPS (reverse proxy) or reach it only through a protected tunnel or VPN.
+
+Configuration is rejected when `auth` is enabled without `listen` or `host`, unless you opt in
+explicitly with `shared_origin = true`. `doctor` warns about that opt-in.
 
 ## Request protections
 

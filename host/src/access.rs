@@ -115,6 +115,8 @@ pub struct AdminSettings {
     pub host: Option<String>,
     /// Explicit opt-in to serving /admin on the apps' origin (no `host`).
     pub shared_origin: bool,
+    /// Separate listener for /admin only (a different port is a different browser origin).
+    pub listen: Option<SocketAddr>,
     pub users_file: PathBuf,
     pub session_ttl_secs: u64,
     pub cookie_secure: CookieSecure,
@@ -146,6 +148,7 @@ pub(crate) struct RawAdmin {
     auth: Option<String>,
     host: Option<String>,
     shared_origin: Option<bool>,
+    listen: Option<String>,
     users_file: Option<String>,
     session_ttl: Option<crate::config::Quantity>,
     cookie_secure: Option<String>,
@@ -254,10 +257,30 @@ pub(crate) fn build_admin(
         problems.push(format!("[admin] host: {h:?} must be a host name such as \"admin.example.net\" (optionally with :port)"));
     }
     let shared_origin = raw.shared_origin.unwrap_or(false);
-    if auth != AdminAuth::Disabled && host.is_none() && !shared_origin {
+    let listen =
+        raw.listen
+            .filter(|l| !l.trim().is_empty())
+            .and_then(|l| match l.parse::<SocketAddr>() {
+                Ok(a) => Some(a),
+                Err(_) => {
+                    problems.push(format!(
+                        "[admin] listen: {l:?} is not an address:port such as \"0.0.0.0:8081\""
+                    ));
+                    None
+                }
+            });
+    if let Some(a) = listen
+        && a.port() == server.listen.port()
+    {
+        problems.push("[admin] listen: must use a different port than [server] listen".into());
+    }
+    if listen.is_some() && host.is_some() {
+        problems.push("[admin] listen and host are alternatives; set only one".into());
+    }
+    if auth != AdminAuth::Disabled && host.is_none() && listen.is_none() && !shared_origin {
         problems.push(
-            "[admin] host: required when the admin interface is enabled, so app code never runs on the admin origin; \
-             set a dedicated host name, or set shared_origin = true to accept that risk"
+            "[admin] host or listen: required when the admin interface is enabled, so app code never runs on the admin origin; \
+             set a dedicated host name or port, or set shared_origin = true to accept that risk"
                 .into(),
         );
     }
@@ -340,6 +363,7 @@ pub(crate) fn build_admin(
         auth,
         host,
         shared_origin,
+        listen,
         users_file: config_path(
             config_dir,
             &raw.users_file.unwrap_or_else(|| "admin-users".into()),

@@ -7,21 +7,33 @@
 # Every official release surveyed on 2026-10-08 ships `<artifact>-web-<version>.zip` holding one
 # top-level directory with a static site whose index.html uses relative URLs only, plus
 # SHA256SUMS.txt. See docs/apps.md.
+#
+# category, tagline and color follow https://getartcraft.com/apps; the launcher shows them with
+# the official logos (host/assets/icons/<id>.webp).
 
 [apps.photocraft]
 name = "PhotoCraft"
+category = "Image editor"
+tagline = "The open-source image editor you already know how to use."
+color = "#2f7bf5"
 repository = "storytold/photocraft"
 artifact_patterns = ["photocraft-web-{version}.zip"]
 notes = "Content-hashed asset names. WebGPU needs a secure context; falls back to WebGL2."
 
 [apps.vectorcraft]
 name = "VectorCraft"
+category = "Vector illustration"
+tagline = "Fast, open-source vector illustration, reimagined in pure Rust."
+color = "#e8573f"
 repository = "storytold/vectorcraft"
 artifact_patterns = ["vectorcraft-web-{version}.zip"]
 notes = "Content-hashed asset names. WebGPU needs a secure context; falls back to WebGL2."
 
 [apps.filmcraft]
 name = "FilmCraft"
+category = "Video editor"
+tagline = "Professional, open-source video editing, rebuilt from scratch in Rust."
+color = "#8b5cf6"
 repository = "storytold/filmcraft"
 artifact_patterns = ["filmcraft-web-{version}.zip"]
 icon = "favicon.png"
@@ -29,6 +41,9 @@ notes = "Projects live in browser storage (OPFS) for the serving origin."
 
 [apps.lightcraft]
 name = "LightCraft"
+category = "Photo library & raw developer"
+tagline = "An open-source photo library and raw developer that runs on your machine."
+color = "#f2a516"
 repository = "storytold/lightcraft"
 artifact_patterns = ["lightcraft-web-{version}.zip"]
 # Since v0.4.0 the web archive also contains a Cargo target directory (native build scripts,
@@ -47,12 +62,18 @@ notes = "Experimental upstream. The library lives in browser storage for the ser
 
 [apps.pdfcraft]
 name = "PdfCraft"
+category = "PDF workbench"
+tagline = "The open-source PDF workbench: read, organize, combine, split and secure."
+color = "#12a58a"
 repository = "storytold/printcraft"
 artifact_patterns = ["pdfcraft-web-{version}.zip", "printcraft-web-{version}.zip"]
 notes = "Repository storytold/printcraft; web artifacts were renamed printcraft-web to pdfcraft-web in v0.4.0."
 
 [apps.effectcraft]
 name = "EffectCraft"
+category = "Motion graphics & VFX"
+tagline = "Open-source motion graphics and visual effects, built in pure Rust."
+color = "#e0368f"
 repository = "storytold/effectcraft"
 artifact_patterns = ["effectcraft-web-{version}.zip"]
 icon = "favicon.svg"
@@ -60,6 +81,9 @@ notes = "Registers a service worker scoped to its release directory. Projects li
 
 [apps.designcraft]
 name = "DesignCraft"
+category = "Page layout & publishing"
+tagline = "Open-source page layout and publishing, rebuilt in pure Rust."
+color = "#7bb51c"
 repository = "storytold/designcraft"
 artifact_patterns = ["designcraft-web-{version}.zip"]
 notes = "Content-hashed asset names. WebGPU needs a secure context; falls back to WebGL2."

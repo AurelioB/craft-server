@@ -23,12 +23,11 @@ struct Server {
     shared: Arc<Shared>,
 }
 
-fn start(e: &Env) -> Server {
+fn spawn(app: axum::Router) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    let shared = Shared::new(Arc::new(e.cfg.clone()), Arc::new(Activity::new()));
-    let app = router(shared.clone()).into_make_service_with_connect_info::<SocketAddr>();
+    let svc = app.into_make_service_with_connect_info::<SocketAddr>();
     std::thread::spawn(move || {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -36,10 +35,75 @@ fn start(e: &Env) -> Server {
             .unwrap()
             .block_on(async move {
                 let l = tokio::net::TcpListener::from_std(listener).unwrap();
-                axum::serve(l, app).await.unwrap();
+                axum::serve(l, svc).await.unwrap();
             })
     });
-    Server { url, shared }
+    url
+}
+
+fn start(e: &Env) -> Server {
+    let shared = Shared::new(Arc::new(e.cfg.clone()), Arc::new(Activity::new()));
+    Server {
+        url: spawn(router(shared.clone())),
+        shared,
+    }
+}
+
+#[test]
+fn admin_listener_keeps_admin_and_apps_on_separate_ports() {
+    let gh = FakeGitHub::start();
+    let e = installed_env(
+        &gh,
+        "[admin]\nauth = \"none\"\nlisten = \"127.0.0.1:18999\"\n",
+    );
+    let shared = Shared::new(Arc::new(e.cfg.clone()), Arc::new(Activity::new()));
+    let apps = spawn(router(shared.clone()));
+    let admin = spawn(craft_host::server::admin_router(shared));
+    assert_eq!(
+        get(&format!("{apps}/admin/"), &[]).status,
+        404,
+        "no admin on the apps' port"
+    );
+    assert_eq!(get(&format!("{apps}/testcraft/"), &[]).status, 302);
+    assert_eq!(get(&format!("{admin}/admin/"), &[]).status, 200);
+    assert_eq!(
+        get(&format!("{admin}/"), &[]).header("location"),
+        Some("admin/")
+    );
+    for path in [
+        "/testcraft/",
+        "/testcraft/1.0.0/index.html",
+        "/status.json",
+        "/launcher/launcher.js",
+    ] {
+        assert_eq!(
+            get(&format!("{admin}{path}"), &[]).status,
+            404,
+            "{path} is not served on the admin port"
+        );
+    }
+    let page = get(&format!("{admin}/admin/"), &[]);
+    let csrf = page
+        .cookies()
+        .into_iter()
+        .find_map(|c| c.strip_prefix("craft_csrf=").map(str::to_string))
+        .unwrap();
+    let cookie = format!("craft_csrf={csrf}");
+    let from_apps = [
+        ("Cookie", cookie.as_str()),
+        ("X-Craft-CSRF", csrf.as_str()),
+        ("Origin", apps.as_str()),
+    ];
+    let r = request(
+        "POST",
+        &format!("{admin}/admin/api/apps/testcraft/check"),
+        &from_apps,
+        None,
+    );
+    assert_eq!(
+        r.status, 403,
+        "a request from the apps' origin (other port) is refused"
+    );
 }
 
 struct Resp {
@@ -159,6 +223,32 @@ fn apps_are_served_under_stable_and_versioned_paths() {
     let status: serde_json::Value =
         serde_json::from_slice(&get(&format!("{u}/status.json"), &[]).body).unwrap();
     assert_eq!(status["apps"][0]["active"], "1.0.0");
+    // Custom apps have no built-in logo and this release declares no icon.
+    assert!(status["apps"][0]["icon"].is_null());
+    for (path, ct) in [
+        ("icons/photocraft.webp", "image/webp"),
+        ("icons/artcraft.svg", "image/svg+xml"),
+        ("fonts/archivo-latin.woff2", "font/woff2"),
+    ] {
+        let r = get(&format!("{u}/launcher/{path}"), &[]);
+        assert_eq!(
+            (r.status, r.header("content-type")),
+            (200, Some(ct)),
+            "{path}"
+        );
+        assert!(!r.body.is_empty());
+    }
+    for path in [
+        "icons/unknown.webp",
+        "icons/../launcher.js",
+        "../status.json",
+    ] {
+        assert_eq!(
+            get(&format!("{u}/launcher/{path}"), &[]).status,
+            404,
+            "{path}"
+        );
+    }
 
     let r = get(&format!("{u}/testcraft"), &[]);
     assert_eq!((r.status, r.header("location")), (301, Some("testcraft/")));

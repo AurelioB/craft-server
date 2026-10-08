@@ -190,6 +190,10 @@ pub struct AppConfig {
     pub exclude: Vec<String>,
     pub icon: String,
     pub notes: String,
+    /// Launcher metadata: short category, one-line description, brand color (#rrggbb).
+    pub category: String,
+    pub tagline: String,
+    pub color: String,
     pub keep_latest: u32,
     pub keep_days: u32,
     /// Optional separate origin (scheme://host[:port]) for this app's links, giving it browser
@@ -342,6 +346,9 @@ struct RawApp {
     exclude: Option<Vec<String>>,
     icon: Option<String>,
     notes: Option<String>,
+    category: Option<String>,
+    tagline: Option<String>,
+    color: Option<String>,
 }
 
 impl RawApp {
@@ -353,6 +360,9 @@ impl RawApp {
             || self.exclude.is_some()
             || self.icon.is_some()
             || self.notes.is_some()
+            || self.category.is_some()
+            || self.tagline.is_some()
+            || self.color.is_some()
     }
 
     fn overlay(self, o: RawApp) -> RawApp {
@@ -375,6 +385,9 @@ impl RawApp {
             exclude: o.exclude.or(self.exclude),
             icon: o.icon.or(self.icon),
             notes: o.notes.or(self.notes),
+            category: o.category.or(self.category),
+            tagline: o.tagline.or(self.tagline),
+            color: o.color.or(self.color),
         }
     }
 }
@@ -634,6 +647,14 @@ fn build_app(
             w("icon")
         ));
     }
+    let color = raw.color.unwrap_or_default();
+    if !color.is_empty()
+        && !(color.len() == 7
+            && color.starts_with('#')
+            && color[1..].bytes().all(|c| c.is_ascii_hexdigit()))
+    {
+        problems.push(format!("{}: {color:?} must be a #rrggbb color", w("color")));
+    }
     let origin = raw
         .origin
         .map(|o| o.trim().trim_end_matches('/').to_string())
@@ -675,6 +696,9 @@ fn build_app(
         exclude,
         icon,
         notes: raw.notes.unwrap_or_default(),
+        category: raw.category.unwrap_or_default(),
+        tagline: raw.tagline.unwrap_or_default(),
+        color,
         keep_latest: raw.keep_latest.unwrap_or(retention.keep_latest),
         keep_days: raw.keep_days.unwrap_or(retention.keep_days),
         origin,
@@ -1117,7 +1141,23 @@ entry = "effectcraft"
             .0
             .join("\n");
         assert!(all.contains("needs [server] trusted_proxies"), "{all}");
-        assert!(all.contains("[admin] host: required"), "{all}");
+        assert!(all.contains("[admin] host or listen: required"), "{all}");
+        let all =
+            load("[admin]\nauth = \"basic\"\nlisten = \"0.0.0.0:8080\"\nhost = \"a.example\"\n")
+                .unwrap_err()
+                .0
+                .join("\n");
+        assert!(
+            all.contains("different port") && all.contains("set only one"),
+            "{all}"
+        );
+        assert_eq!(
+            load("[admin]\nauth = \"basic\"\nlisten = \"0.0.0.0:8081\"\n")
+                .unwrap()
+                .admin
+                .listen,
+            Some("0.0.0.0:8081".parse().unwrap())
+        );
         load("[admin]\nauth = \"basic\"\nshared_origin = true\n")
             .expect("explicit shared-origin opt-in");
         let all = load("[admin]\nauth = \"oidc\"\n").unwrap_err().0.join("\n");

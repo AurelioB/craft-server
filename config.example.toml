@@ -51,12 +51,15 @@ cache_max_size = "2GiB"        # downloaded archives (least recently used are re
 #   oidc   OpenID Connect login (see [admin.oidc])
 #   proxy  user from a header set by a trusted proxy (forward auth, see [admin.proxy])
 auth = "disabled"
-# Required when auth is not "disabled": the host name /admin is served on (and nothing else is
-# served there), so app code never shares a browser origin with an administrator's session.
-# Route this name to the same server.
-host = ""                      # e.g. "admin.apps.example.net"
-# Serve /admin on the apps' host names instead. Only if you accept that code served by an app
-# could act with a signed-in administrator's session.
+# When auth is not "disabled", /admin needs an origin of its own so app code never runs where an
+# administrator is signed in. Set ONE of:
+#   listen  a separate port, e.g. "0.0.0.0:8081" (published as ADMIN_PORT in .env): no DNS needed,
+#           open http://<server>:<ADMIN_PORT>/admin/ ; only /admin is served there
+#   host    a dedicated host name routed to this server, e.g. "admin.apps.example.net"
+listen = ""
+host = ""
+# Or serve /admin on the apps' address. Only if you accept that code served by an app could act
+# with a signed-in administrator's session.
 shared_origin = false
 users_file = "admin-users"     # relative to CONFIG_DIR; lines "name:<hash>", see `craft-host hash-password`
 session_ttl = "12h"
@@ -96,7 +99,8 @@ allowed_groups = []
 #                               # host name so it gets separate browser storage
 #
 # Additional apps also define name, repository, artifact_patterns and optionally
-# checksum_assets, exclude, icon and notes:
+# checksum_assets, exclude, icon (path inside the release), notes, and launcher metadata
+# category, tagline and color ("#rrggbb"):
 #
 # [apps.examplecraft]
 # name = "ExampleCraft"

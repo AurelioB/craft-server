@@ -26,8 +26,6 @@ use crate::status;
 use crate::store::Store;
 
 const LAUNCHER_HTML: &str = include_str!("../assets/index.html");
-const LAUNCHER_JS: &str = include_str!("../assets/launcher.js");
-const LAUNCHER_CSS: &str = include_str!("../assets/launcher.css");
 const INSTALLING_HTML: &str = include_str!("../assets/installing.html");
 
 pub struct Shared {
@@ -71,13 +69,25 @@ async fn launcher() -> Response<Body> {
     static_page(LAUNCHER_HTML, "text/html; charset=utf-8")
 }
 
-async fn launcher_asset(Path(name): Path<String>) -> Response<Body> {
-    match name.as_str() {
-        "launcher.js" => static_page(LAUNCHER_JS, "text/javascript; charset=utf-8"),
-        "launcher.css" => static_page(LAUNCHER_CSS, "text/css; charset=utf-8"),
-        "installing.html" => static_page(INSTALLING_HTML, "text/html; charset=utf-8"),
-        _ => simple(StatusCode::NOT_FOUND, "not found\n"),
-    }
+async fn launcher_asset(Path(path): Path<String>) -> Response<Body> {
+    let Some(asset) = crate::assets::launcher(&path) else {
+        return simple(StatusCode::NOT_FOUND, "not found\n");
+    };
+    let mut res = Response::new(Body::from(asset.bytes));
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(asset.content_type),
+    );
+    // Logos and fonts only change with a new image; pages and script revalidate.
+    let cache = if path.starts_with("icons/") || path.starts_with("fonts/") {
+        "public, max-age=86400"
+    } else {
+        "no-cache"
+    };
+    res.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+    set_common_headers(&mut res);
+    res
 }
 
 async fn healthz() -> Response<Body> {
@@ -202,14 +212,8 @@ async fn host_gate(
     next.run(req).await
 }
 
-pub fn router(shared: Arc<Shared>) -> Router {
-    Router::new()
-        .route("/", get(launcher))
-        .route("/launcher/{name}", get(launcher_asset))
-        .route("/status.json", get(status_json))
-        .route("/healthz", get(healthz))
-        .route("/readyz/{entry}", get(readyz))
-        .route("/admin", get(admin::root_redirect))
+fn admin_routes(r: Router<Arc<Shared>>) -> Router<Arc<Shared>> {
+    r.route("/admin", get(admin::root_redirect))
         .route("/admin/", get(admin::index))
         .route(
             "/admin/login",
@@ -221,9 +225,43 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/admin/api/status", get(admin::api_status))
         .route("/admin/api/apps/{app}/{action}", post(admin::api_action))
         .route("/admin/{name}", get(admin::asset))
-        .fallback(app_request)
+}
+
+/// The main listener: launcher, status, health and apps, plus /admin unless it has its own
+/// listener (`[admin] listen`).
+pub fn router(shared: Arc<Shared>) -> Router {
+    let mut r = Router::new()
+        .route("/", get(launcher))
+        .route("/launcher/{*path}", get(launcher_asset))
+        .route("/status.json", get(status_json))
+        .route("/healthz", get(healthz))
+        .route("/readyz/{entry}", get(readyz));
+    if shared.cfg.admin.listen.is_none() {
+        r = admin_routes(r);
+    }
+    r.fallback(app_request)
         .layer(middleware::from_fn_with_state(shared.clone(), host_gate))
         .with_state(shared)
+}
+
+/// The dedicated admin listener: only /admin and /healthz, nothing an app could run on.
+pub fn admin_router(shared: Arc<Shared>) -> Router {
+    let r = Router::new()
+        .route("/", get(|| async { redirect(StatusCode::FOUND, "admin/") }))
+        .route("/healthz", get(healthz));
+    admin_routes(r)
+        .fallback(|| async { simple(StatusCode::NOT_FOUND, "not found\n") })
+        .layer(middleware::from_fn_with_state(shared.clone(), host_gate))
+        .with_state(shared)
+}
+
+async fn shutdown_signal() {
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("signal handler");
+    tokio::select! {
+        _ = term.recv() => {}
+        _ = tokio::signal::ctrl_c() => {}
+    }
 }
 
 /// Serve until the process is stopped.
@@ -231,17 +269,30 @@ pub async fn serve(shared: Arc<Shared>) -> anyhow::Result<()> {
     let addr = shared.cfg.server.listen;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     log::info!("listening on http://{addr}");
-    let app = router(shared).into_make_service_with_connect_info::<SocketAddr>();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let mut term =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("signal handler");
-            tokio::select! {
-                _ = term.recv() => {}
-                _ = tokio::signal::ctrl_c() => {}
+    let main = axum::serve(
+        listener,
+        router(shared.clone()).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal());
+    match shared.cfg.admin.listen {
+        Some(admin_addr) if shared.cfg.admin.auth != AdminAuth::Disabled => {
+            let admin_listener = tokio::net::TcpListener::bind(admin_addr).await?;
+            log::info!("admin interface on http://{admin_addr}/admin/");
+            let admin = axum::serve(
+                admin_listener,
+                admin_router(shared).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown_signal());
+            tokio::try_join!(async { main.await }, async { admin.await })?;
+        }
+        _ => {
+            if let Some(h) = &shared.cfg.admin.host
+                && shared.cfg.admin.auth != AdminAuth::Disabled
+            {
+                log::info!("admin interface only on host {h}, path /admin/");
             }
-        })
-        .await?;
+            main.await?;
+        }
+    }
     Ok(())
 }

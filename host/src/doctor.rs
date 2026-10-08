@@ -334,11 +334,12 @@ fn check_admin(r: &mut Report, cfg: &Config, network: bool) {
     {
         r.warn("every authenticated user may manage updates; set [admin] allowed_users or allowed_groups", None);
     }
-    match &admin.host {
-        Some(h) => r.ok(format!("admin interface only on host {h}, separate from the apps' origin")),
-        None => r.warn(
+    match (&admin.host, admin.listen) {
+        (Some(h), _) => r.ok(format!("admin interface only on host {h}, separate from the apps' origin")),
+        (None, Some(a)) => r.ok(format!("admin interface only on its own listener {a}, separate from the apps' origin")),
+        (None, None) => r.warn(
             "shared_origin = true: the admin interface shares a browser origin with the apps; code served by an app could use a signed-in admin session",
-            Some("set [admin] host to a dedicated host name (e.g. admin.example.net) routed to this server and remove shared_origin".into()),
+            Some("set [admin] listen to a dedicated port (or host to a dedicated host name) and remove shared_origin".into()),
         ),
     }
 }

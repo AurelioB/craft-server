@@ -29,7 +29,13 @@ pub struct AppStatus {
     pub enabled: bool,
     pub active: Option<String>,
     pub active_url: Option<String>,
+    /// Logo URL relative to the site root: the official logo for built-in apps, otherwise the
+    /// release's `icon`.
     pub icon: Option<String>,
+    pub category: String,
+    pub tagline: String,
+    /// Brand color, `#rrggbb`, or empty.
+    pub color: String,
     /// Installed release waiting for the app to be idle.
     pub pending: Option<String>,
     /// "immediate" or "idle".
@@ -145,17 +151,22 @@ pub fn app_status(cfg: &Config, app: &AppConfig, state: &AppState, public: bool)
         state: st.into(),
         enabled: app.enabled,
         active_url: active.as_ref().map(|v| format!("{base}{}/{v}/", app.entry)),
-        icon: active
-            .as_ref()
-            .filter(|v| {
-                !app.icon.is_empty()
-                    && cfg
-                        .release_root(app)
-                        .join(v.as_str())
-                        .join(&app.icon)
-                        .is_file()
-            })
-            .map(|v| format!("{}/{v}/{}", app.entry, app.icon)),
+        icon: crate::assets::logo(&app.id).or_else(|| {
+            active
+                .as_ref()
+                .filter(|v| {
+                    !app.icon.is_empty()
+                        && cfg
+                            .release_root(app)
+                            .join(v.as_str())
+                            .join(&app.icon)
+                            .is_file()
+                })
+                .map(|v| format!("{}/{v}/{}", app.entry, app.icon))
+        }),
+        category: app.category.clone(),
+        tagline: app.tagline.clone(),
+        color: app.color.clone(),
         active,
         pending: state.pending.clone(),
         activation: match app.activation {
