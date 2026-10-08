@@ -41,7 +41,7 @@ main { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax
 .app {
   display: flex; flex-direction: column; gap: 8px;
   padding: 16px; border-radius: 12px; border: 1px solid var(--border); background: var(--card);
-  color: inherit; text-decoration: none; min-height: 150px;
+  color: inherit; text-decoration: none;
 }
 a.app:hover, a.app:focus-visible { border-color: var(--accent); outline: none; }
 .app[aria-disabled="true"] { opacity: 0.75; cursor: default; }
