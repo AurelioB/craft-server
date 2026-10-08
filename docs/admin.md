@@ -56,10 +56,16 @@ apps = "signed-in"
 A page load without a session (form, OIDC) goes to the sign-in page and returns to the requested
 page afterwards; other requests (scripts, images, `status.json`) get 401, Basic asks the browser
 for credentials, and proxy mode answers 403 without an identity. `/healthz`, `/readyz/…`,
-`/auth/…`, the launcher's logos and fonts, and apps' `*.webmanifest` files (browsers fetch them
-without cookies; they hold only the app's name, icons and colors) stay reachable. When signed
-in, the launcher shows the account, its role, a link to `/admin` for admins and a sign-out
-button.
+`/auth/…`, the launcher's logos and fonts, and apps' `*.webmanifest` files stay reachable.
+Browsers fetch manifests without cookies; they describe the app (EffectCraft 0.6.0: name, short
+name, description, categories, icons, colors, start URL, scope), so anyone who can reach the
+server can read those. When signed in, the launcher shows the account, its role, a link to
+`/admin` for admins and a sign-out button.
+
+Signing in controls what the server sends, not what a browser already has: after sign-out or
+session expiry, tabs that are already open keep running, and files the browser cached (release
+files are cached as immutable) or that an app's service worker stored can still be used on that
+device. New requests to the server need a fresh sign-in.
 
 ## Sign-in methods
 

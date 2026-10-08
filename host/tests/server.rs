@@ -746,6 +746,42 @@ fn admin_host_separates_the_admin_origin_from_the_apps() {
         get(&format!("{u}/"), &[("Host", "admin.example.net")]).status,
         404
     );
+    // No app or launcher code runs on the admin host, so no upstream script shares its origin.
+    for path in [
+        "/testcraft/1.0.0/index.html",
+        "/testcraft/1.0.0/big.js",
+        "/launcher/launcher.js",
+        "/status.json",
+    ] {
+        assert_eq!(
+            get(&format!("{u}{path}"), &[("Host", "admin.example.net")]).status,
+            404,
+            "{path} on the admin host"
+        );
+    }
+    // An admin action sent from a page on the apps' host is refused, even with the CSRF pair.
+    let page = get(&format!("{u}/admin/"), &[("Host", "admin.example.net")]);
+    let csrf = csrf_from(&page);
+    let cookie = format!("craft_csrf={csrf}");
+    let from_apps = request(
+        "POST",
+        &format!("{u}/admin/api/apps/testcraft/check"),
+        &[
+            ("Host", "admin.example.net"),
+            ("Cookie", &cookie),
+            ("X-Craft-CSRF", &csrf),
+            ("Origin", "http://apps.example.net"),
+        ],
+        None,
+    );
+    assert_eq!(from_apps.status, 403);
+    assert!(
+        !page
+            .headers
+            .iter()
+            .any(|(k, v)| k == "set-cookie" && v.to_ascii_lowercase().contains("domain=")),
+        "cookies are host-only"
+    );
     assert_eq!(get(&format!("{u}/testcraft/"), &[]).status, 302);
     for host in ["admin.example.net", "apps.example.net"] {
         assert_eq!(get(&format!("{u}/healthz"), &[("Host", host)]).status, 200);
