@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Craft Apps</title>
+  <link rel="stylesheet" href="launcher/launcher.css">
+  <script type="module" src="launcher/launcher.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Craft Apps</h1>
+    <p class="lede">Browser apps served from this host. They run on your computer: files you open stay in your browser and are not uploaded here.</p>
+  </header>
+  <div id="notices" role="status" aria-live="polite"></div>
+  <main id="apps" aria-busy="true">
+    <p class="muted">Loading app list…</p>
+  </main>
+  <footer>
+    <p class="muted">Documents and browser libraries live in this browser for this address. Export or back them up from inside each app; a different host name starts with empty storage.</p>
+    <p class="muted" id="updated"></p>
+  </footer>
+</body>
+</html>

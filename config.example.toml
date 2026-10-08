@@ -1,0 +1,55 @@
+# Craft Apps Host updater configuration. Copy to CONFIG_DIR/config.toml.
+# Every setting is optional; the values shown are the defaults. Unknown keys are rejected.
+# Sizes accept bytes or units ("512MiB", "2GiB"); durations accept seconds or "30s"/"15m"/"1h"/"1d".
+
+[updater]
+check_on_startup = true
+check_interval = "1h"        # at least 60s
+http_timeout = "30s"         # API calls and the serving check
+download_timeout = "15m"     # whole archive download
+max_retries = 3              # per request, with exponential backoff
+retry_backoff = "5s"
+retry_backoff_max = "5m"
+github_api_url = "https://api.github.com"
+# Optional token to raise the API rate limit (60/hour unauthenticated). A path relative to
+# CONFIG_DIR, readable by the updater only. The value is never logged or printed.
+github_token_file = ""
+# Private nginx listener used to test candidates before publishing. "" disables the check.
+validation_url = "http://web:8081"
+heartbeat_interval = "30s"
+lock_wait = "10m"            # how long manual commands wait for a running update
+log_max_size = "10MiB"       # only with LOG_DIR (compose.logs.yaml)
+log_backups = 5
+
+[limits]
+max_download = "512MiB"
+max_extracted = "1GiB"
+max_files = 5000
+max_compression_ratio = 200
+min_free_space = "256MiB"    # kept free on DATA_DIR, WORK_DIR and CACHE_DIR
+
+[retention]
+keep_latest = 3              # most recently installed releases kept per app
+keep_days = 30               # plus every release installed within this many days
+cache_max_size = "2GiB"      # downloaded archives (least recently used are removed)
+
+# Per-app settings. Built-in apps: photocraft, vectorcraft, filmcraft, lightcraft, pdfcraft,
+# effectcraft, designcraft. Built-in apps accept only the keys shown here.
+#
+# [apps.photocraft]
+# enabled = true
+# auto_update = true            # false: install once, then only on `update`
+# pinned_version = ""           # e.g. "0.5.0"; the CLI `pin` takes precedence
+# channel = "stable"            # or "prerelease"
+# entry = "photocraft"          # stable URL path: /photocraft/
+# release_dir = "releases/photocraft"   # relative to DATA_DIR
+# keep_latest = 3
+# keep_days = 30
+#
+# Additional apps also define name, repository, artifact_patterns and optionally
+# checksum_assets, exclude, icon and notes:
+#
+# [apps.examplecraft]
+# name = "ExampleCraft"
+# repository = "storytold/examplecraft"
+# artifact_patterns = ["examplecraft-web-{version}.zip"]

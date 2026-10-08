@@ -1,0 +1,31 @@
+# MIME types for the Craft web apps. Upstream hosting notes require application/wasm for
+# streaming compilation and text/javascript for ES modules.
+types {
+    text/html                    html htm;
+    text/css                     css;
+    text/javascript              js mjs;
+    text/plain                   txt md;
+    application/wasm             wasm;
+    application/json             json map;
+    application/manifest+json    webmanifest;
+    application/xml              xml;
+    application/pdf              pdf;
+    application/zip              zip;
+    application/gzip             gz;
+    image/svg+xml                svg svgz;
+    image/png                    png;
+    image/jpeg                   jpg jpeg;
+    image/gif                    gif;
+    image/webp                   webp;
+    image/avif                   avif;
+    image/x-icon                 ico;
+    font/woff                    woff;
+    font/woff2                   woff2;
+    font/ttf                     ttf;
+    font/otf                     otf;
+    audio/mpeg                   mp3;
+    audio/ogg                    ogg;
+    audio/wav                    wav;
+    video/mp4                    mp4;
+    video/webm                   webm;
+}
