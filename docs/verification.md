@@ -47,7 +47,12 @@ Stack started with directories under a path containing a space, `RUN_UID=1000`,
 | LightCraft 0.4.0 | yes, demo library and develop panel | none | not exercised | not exercised |
 | PdfCraft 0.4.0 | yes | none | PDF via file picker, page rendered | not exercised |
 | EffectCraft 0.6.0 | yes, demo composition renders; service worker registered for `/effectcraft/0.6.0/` | none | not exercised | not exercised |
-| DesignCraft 0.4.0 | yes | none | not achieved: synthetic clicks on "Open"/"Open sample magazine" did not register in headless mode | not exercised |
+| DesignCraft 0.4.0 | yes | none | new Letter document; PDF placed via drag and drop | saved `Untitled-1.designcraft` (download, 3.4 KB) |
+
+An earlier DesignCraft attempt failed because the synthetic clicks hit no button (wrong
+coordinates, not a serving fault): the same input sequence behaved identically on this host and
+on the unmodified upstream archive served with `python3 -m http.server`, as upstream's
+`HOSTING.md` suggests for local tests.
 
 - **Open tab during an update.** A PhotoCraft tab loaded from `/photocraft/0.3.0/` kept working
   after 0.5.0 was activated: it created a new document and re-fetched its JS and wasm (200 from
@@ -64,6 +69,10 @@ Stack started with directories under a path containing a space, `RUN_UID=1000`,
 
 - Behaviour on real HTTPS behind a reverse proxy, WebGPU rendering, and browsers other than
   Chromium.
-- Saving in apps other than PhotoCraft; app-specific import formats beyond PNG, SVG and PDF.
+- Saving in VectorCraft, FilmCraft, LightCraft, PdfCraft and EffectCraft; opening files in
+  FilmCraft, LightCraft and EffectCraft (their bundled demo projects were rendered instead);
+  import formats beyond PNG, SVG and PDF.
+- Data from two apps on one origin interacting over time: the storage names were inventoried and
+  did not collide, but long-term coexistence was not exercised.
 - User-namespace remapping and Docker Desktop.
 - Hourly scheduling over long periods (exercised with short intervals and manual commands).
