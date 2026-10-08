@@ -77,7 +77,8 @@ the clipboard and persistent storage in a secure context.
 - Redirects are relative, so the site works under any host name and behind a path prefix.
 - List the proxy in `[server] trusted_proxies` so `X-Forwarded-Proto/-Host` are honoured (secure
   cookies, admin host matching) and, with `[admin] auth = "proxy"`, its identity headers.
-- Give `/admin` its own host name (`[admin] host`), see [admin.md](admin.md#browser-origin-isolation).
+- Give `/admin` its own host name (`[admin] host`, required when it is enabled), see
+  [admin.md](admin.md#browser-origin-isolation).
 - Browser storage is per origin: a LAN name and a public name for the same server have separate
   app libraries. Pick one canonical host name per app.
 - `/healthz` (process alive) and `/readyz/<app>` (app installed) suit proxy health checks.

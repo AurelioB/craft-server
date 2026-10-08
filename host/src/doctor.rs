@@ -337,8 +337,8 @@ fn check_admin(r: &mut Report, cfg: &Config, network: bool) {
     match &admin.host {
         Some(h) => r.ok(format!("admin interface only on host {h}, separate from the apps' origin")),
         None => r.warn(
-            "the admin interface shares a browser origin with the apps; code served by an app could use a signed-in admin session",
-            Some("set [admin] host to a dedicated host name (e.g. admin.example.net) routed to this server".into()),
+            "shared_origin = true: the admin interface shares a browser origin with the apps; code served by an app could use a signed-in admin session",
+            Some("set [admin] host to a dedicated host name (e.g. admin.example.net) routed to this server and remove shared_origin".into()),
         ),
     }
 }

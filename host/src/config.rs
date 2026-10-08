@@ -1117,6 +1117,9 @@ entry = "effectcraft"
             .0
             .join("\n");
         assert!(all.contains("needs [server] trusted_proxies"), "{all}");
+        assert!(all.contains("[admin] host: required"), "{all}");
+        load("[admin]\nauth = \"basic\"\nshared_origin = true\n")
+            .expect("explicit shared-origin opt-in");
         let all = load("[admin]\nauth = \"oidc\"\n").unwrap_err().0.join("\n");
         assert!(all.contains("needs an [admin.oidc] section"), "{all}");
         let all = load("[admin]\nauth = \"oidc\"\n[admin.oidc]\nissuer = \"https://id.example.net\"\nredirect_url = \"https://x/elsewhere\"\n").unwrap_err().0.join("\n");

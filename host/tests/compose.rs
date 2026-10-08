@@ -272,6 +272,7 @@ heartbeat_interval = "5s"
 min_free_space = 0
 [admin]
 auth = "form"
+shared_origin = true
 [apps.testcraft]
 name = "TestCraft"
 repository = "storytold/testcraft"

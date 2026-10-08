@@ -288,7 +288,7 @@ fn wait_idle(url: &str, headers: &[(&str, &str)]) -> serde_json::Value {
 #[test]
 fn unauthenticated_mode_still_requires_csrf_for_actions() {
     let gh = FakeGitHub::start();
-    let e = installed_env(&gh, "[admin]\nauth = \"none\"\n");
+    let e = installed_env(&gh, "[admin]\nauth = \"none\"\nshared_origin = true\n");
     let s = start(&e);
     let u = &s.url;
     assert_eq!(
@@ -363,7 +363,7 @@ fn unauthenticated_mode_still_requires_csrf_for_actions() {
 #[test]
 fn basic_auth_protects_pages_and_api() {
     let gh = FakeGitHub::start();
-    let e = installed_env(&gh, "[admin]\nauth = \"basic\"\n");
+    let e = installed_env(&gh, "[admin]\nauth = \"basic\"\nshared_origin = true\n");
     std::fs::write(
         e.cfg.admin.users_file.clone(),
         format!("ana:{}\n", hash_password("s3cret").unwrap()),
@@ -409,7 +409,7 @@ fn basic_auth_protects_pages_and_api() {
 #[test]
 fn form_login_sessions_and_logout() {
     let gh = FakeGitHub::start();
-    let e = installed_env(&gh, "[admin]\nauth = \"form\"\n");
+    let e = installed_env(&gh, "[admin]\nauth = \"form\"\nshared_origin = true\n");
     std::fs::write(
         e.cfg.admin.users_file.clone(),
         format!("ana:{}\n", hash_password("s3cret").unwrap()),
@@ -507,7 +507,7 @@ fn proxy_identities_only_from_trusted_peers_and_allowed_groups() {
     let gh = FakeGitHub::start();
     let trusted = installed_env(
         &gh,
-        "[server]\ntrusted_proxies = [\"127.0.0.0/8\"]\n[admin]\nauth = \"proxy\"\nallowed_groups = [\"craft-admins\"]\n",
+        "[server]\ntrusted_proxies = [\"127.0.0.0/8\"]\n[admin]\nauth = \"proxy\"\nshared_origin = true\nallowed_groups = [\"craft-admins\"]\n",
     );
     let s = start(&trusted);
     let u = &s.url;
@@ -528,7 +528,7 @@ fn proxy_identities_only_from_trusted_peers_and_allowed_groups() {
 
     let untrusted = installed_env(
         &gh,
-        "[server]\ntrusted_proxies = [\"10.0.0.0/8\"]\n[admin]\nauth = \"proxy\"\n",
+        "[server]\ntrusted_proxies = [\"10.0.0.0/8\"]\n[admin]\nauth = \"proxy\"\nshared_origin = true\n",
     );
     let s = start(&untrusted);
     assert_eq!(
@@ -557,6 +557,31 @@ fn admin_host_separates_the_admin_origin_from_the_apps() {
         200
     );
     assert_eq!(
+        get(
+            &format!("{u}/admin/"),
+            &[("Host", "admin.example.net:8080")]
+        )
+        .status,
+        200,
+        "port ignored"
+    );
+    assert_eq!(
+        get(
+            &format!("{u}/testcraft/"),
+            &[("Host", "admin.example.net:8080")]
+        )
+        .status,
+        404
+    );
+    assert_eq!(
+        get(
+            &format!("{u}/admin/"),
+            &[("Host", "admin.example.net.evil:8080")]
+        )
+        .status,
+        404
+    );
+    assert_eq!(
         get(&format!("{u}/testcraft/"), &[("Host", "admin.example.net")]).status,
         404,
         "apps are not served on the admin host"
@@ -569,6 +594,41 @@ fn admin_host_separates_the_admin_origin_from_the_apps() {
     assert_eq!(
         get(&format!("{u}/healthz"), &[("Host", "admin.example.net")]).status,
         200
+    );
+
+    // Behind a trusted proxy the forwarded host decides; from other peers it is ignored.
+    let behind = installed_env(
+        &gh,
+        "[server]\ntrusted_proxies = [\"127.0.0.0/8\"]\n[admin]\nauth = \"none\"\nhost = \"admin.example.net\"\n",
+    );
+    let s = start(&behind);
+    let fwd_admin = [("X-Forwarded-Host", "admin.example.net")];
+    assert_eq!(get(&format!("{}/admin/", s.url), &fwd_admin).status, 200);
+    assert_eq!(
+        get(&format!("{}/testcraft/", s.url), &fwd_admin).status,
+        404
+    );
+    assert_eq!(
+        get(
+            &format!("{}/admin/", s.url),
+            &[("X-Forwarded-Host", "apps.example.net")]
+        )
+        .status,
+        404
+    );
+    let direct = installed_env(
+        &gh,
+        "[server]\ntrusted_proxies = [\"10.0.0.0/8\"]\n[admin]\nauth = \"none\"\nhost = \"admin.example.net\"\n",
+    );
+    let s = start(&direct);
+    assert_eq!(
+        get(&format!("{}/admin/", s.url), &fwd_admin).status,
+        404,
+        "forged forwarded host"
+    );
+    assert_eq!(
+        get(&format!("{}/testcraft/", s.url), &fwd_admin).status,
+        302
     );
 }
 
@@ -590,7 +650,7 @@ fn oidc_login_validates_state_nonce_and_authorization() {
     let gh = FakeGitHub::start();
     let issuer = format!("{}/oidc", gh.url);
     let sections = format!(
-        "[admin]\nauth = \"oidc\"\nallowed_groups = [\"craft-admins\"]\n[admin.oidc]\nissuer = \"{issuer}\"\nclient_id = \"craft\"\nredirect_url = \"https://apps.example.net/admin/oidc/callback\"\n"
+        "[admin]\nauth = \"oidc\"\nshared_origin = true\nallowed_groups = [\"craft-admins\"]\n[admin.oidc]\nissuer = \"{issuer}\"\nclient_id = \"craft\"\nredirect_url = \"https://apps.example.net/admin/oidc/callback\"\n"
     );
     let e = installed_env(&gh, &sections);
     gh.put_route(

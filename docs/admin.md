@@ -86,10 +86,10 @@ the port is not reachable around it.
 
 ## Browser-origin isolation
 
-Apps and `/admin` share a browser origin unless you separate them. App code is downloaded from
-upstream; if it were compromised, script running on the same origin could use an administrator's
-signed-in session (path-scoped cookies and CSRF tokens do not stop same-origin scripts). To rule
-this out, give the interface its own host name:
+App code is downloaded from upstream; if it were compromised, script running on the same origin
+as `/admin` could use an administrator's signed-in session (path-scoped cookies and CSRF tokens do
+not stop same-origin scripts). The interface therefore needs its own host name whenever it is
+enabled:
 
 ```toml
 [admin]
@@ -97,7 +97,12 @@ host = "admin.apps.example.net"
 ```
 
 Route that name to the same server. `/admin` then answers only on that host, and nothing else
-(launcher, apps, status) is served there. `doctor` warns while `host` is unset.
+(launcher, apps, status) is served there; on every other host name `/admin` answers 404. Behind a
+proxy listed in `[server] trusted_proxies`, `X-Forwarded-Host` decides; from other peers it is
+ignored.
+
+Configuration is rejected when `auth` is enabled without `host`, unless you opt in explicitly with
+`shared_origin = true` (for example for a LAN-only setup). `doctor` warns about that opt-in.
 
 ## Request protections
 

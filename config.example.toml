@@ -51,9 +51,13 @@ cache_max_size = "2GiB"        # downloaded archives (least recently used are re
 #   oidc   OpenID Connect login (see [admin.oidc])
 #   proxy  user from a header set by a trusted proxy (forward auth, see [admin.proxy])
 auth = "disabled"
-# Strongly recommended: serve /admin only on its own host name, so app code never shares a
-# browser origin with an administrator's session. Route this name to the same server.
+# Required when auth is not "disabled": the host name /admin is served on (and nothing else is
+# served there), so app code never shares a browser origin with an administrator's session.
+# Route this name to the same server.
 host = ""                      # e.g. "admin.apps.example.net"
+# Serve /admin on the apps' host names instead. Only if you accept that code served by an app
+# could act with a signed-in administrator's session.
+shared_origin = false
 users_file = "admin-users"     # relative to CONFIG_DIR; lines "name:<hash>", see `craft-host hash-password`
 session_ttl = "12h"
 cookie_secure = "auto"         # auto (Secure when the client used HTTPS) | always | never

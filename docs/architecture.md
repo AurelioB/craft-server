@@ -71,8 +71,9 @@ sequenceDiagram
 - **Activation policy.** The plan asked to apply updates "when the app is not being used". The
   server only observes requests, so `idle` activation is a request-inactivity heuristic;
   versioned URLs make immediate activation safe for open tabs, which is why it is the default.
-- **Admin on the same port.** `/admin` shares the listener; `[admin] host` gives it its own
-  origin, which is the recommended deployment.
+- **Admin on the same port, separate origin.** `/admin` shares the listener but, when enabled,
+  requires its own host name (`[admin] host`) unless `shared_origin = true` explicitly accepts
+  that app code could act with an administrator's session.
 - **LightCraft exclusions.** The manifest's `exclude` list removes the Cargo build directory that
   LightCraft 0.4.0 ships inside its web archive. Native executables anywhere else cause rejection.
   No application file is modified; precompressed copies are added alongside.

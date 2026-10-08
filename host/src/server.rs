@@ -185,7 +185,13 @@ async fn host_gate(
     let is_admin = path == "/admin" || path.starts_with("/admin/");
     if let Some(admin_host) = &s.cfg.admin.host {
         let host = request_host(req.headers(), peer.ip(), &s.cfg.server);
-        let on_admin_host = host.as_deref() == Some(admin_host.as_str());
+        // Ports are ignored unless the configured host names one.
+        let on_admin_host = host.as_deref().is_some_and(|h| {
+            h == admin_host
+                || (!admin_host.contains(':')
+                    && h.rsplit_once(':')
+                        .is_some_and(|(name, _)| name == admin_host))
+        });
         if is_admin != on_admin_host && path != "/healthz" {
             return simple(StatusCode::NOT_FOUND, "not found\n");
         }

@@ -113,6 +113,8 @@ pub struct AdminSettings {
     /// If set, /admin answers only for this host name, and apps are not served on it, so the
     /// administration interface gets its own browser origin.
     pub host: Option<String>,
+    /// Explicit opt-in to serving /admin on the apps' origin (no `host`).
+    pub shared_origin: bool,
     pub users_file: PathBuf,
     pub session_ttl_secs: u64,
     pub cookie_secure: CookieSecure,
@@ -143,6 +145,7 @@ pub(crate) struct RawServer {
 pub(crate) struct RawAdmin {
     auth: Option<String>,
     host: Option<String>,
+    shared_origin: Option<bool>,
     users_file: Option<String>,
     session_ttl: Option<crate::config::Quantity>,
     cookie_secure: Option<String>,
@@ -250,6 +253,14 @@ pub(crate) fn build_admin(
     {
         problems.push(format!("[admin] host: {h:?} must be a host name such as \"admin.example.net\" (optionally with :port)"));
     }
+    let shared_origin = raw.shared_origin.unwrap_or(false);
+    if auth != AdminAuth::Disabled && host.is_none() && !shared_origin {
+        problems.push(
+            "[admin] host: required when the admin interface is enabled, so app code never runs on the admin origin; \
+             set a dedicated host name, or set shared_origin = true to accept that risk"
+                .into(),
+        );
+    }
     let cookie_secure = match raw.cookie_secure.as_deref().unwrap_or("auto") {
         "auto" => CookieSecure::Auto,
         "always" => CookieSecure::Always,
@@ -328,6 +339,7 @@ pub(crate) fn build_admin(
     AdminSettings {
         auth,
         host,
+        shared_origin,
         users_file: config_path(
             config_dir,
             &raw.users_file.unwrap_or_else(|| "admin-users".into()),
