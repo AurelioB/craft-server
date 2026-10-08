@@ -70,9 +70,16 @@ enable the administration page, follow [admin.md](admin.md).
 
 ## HTTPS and the reverse proxy
 
-The container publishes plain HTTP on `BIND_ADDRESS:PORT` (default `127.0.0.1:8080`). Outside
-`localhost`, serve it through an HTTPS reverse proxy of your choice: browsers only allow WebGPU,
-the clipboard and persistent storage in a secure context.
+The container publishes plain HTTP on `BIND_ADDRESS:PORT` (default `0.0.0.0:8080`, every host
+interface). Docker-published ports bypass host firewalls such as ufw; set `BIND_ADDRESS` to one
+address (for example the LAN address, or `127.0.0.1` behind a local proxy) to narrow it.
+
+Plain HTTP from another machine is not a secure context. In Chromium over `http://<LAN address>`
+all seven apps still load and render, but WebGPU and the Origin Private File System are
+unavailable: rendering falls back to WebGL2, and apps that keep projects or libraries in OPFS
+(FilmCraft, LightCraft, EffectCraft) fall back to IndexedDB or memory. The clipboard API is also
+unavailable. For full functionality on the LAN, serve it through an HTTPS reverse proxy with a
+certificate the clients trust:
 
 - Redirects are relative, so the site works under any host name and behind a path prefix.
 - List the proxy in `[server] trusted_proxies` so `X-Forwarded-Proto/-Host` are honoured (secure
