@@ -24,6 +24,8 @@ const NATIVE_MAGICS: &[&[u8]] = &[
 /// Files whose quoted asset references are checked against the release contents.
 const SCANNED: &[&str] = &["index.html", "sw.js"];
 const JS_TYPES: &[&str] = &["text/javascript", "application/javascript"];
+/// Matches `gzip_min_length` in server/nginx.conf: smaller responses are sent uncompressed.
+const COMPRESS_MIN_BYTES: u64 = 1024;
 
 static REF_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"["'`]([^"'`\s<>()]+?\.(?:m?js|wasm|css|png|svg|ico|webmanifest|json|jpe?g|webp|gif|woff2?|ttf|otf))(?:\?[^"'`\s]*)?["'`]"#)
@@ -55,6 +57,8 @@ fn invalid<T>(msg: impl Into<String>) -> Result<T, ValidationError> {
 #[derive(Debug, Default)]
 pub struct Report {
     pub wasm_files: Vec<String>,
+    /// WebAssembly modules large enough that the server must compress them.
+    pub compressible: Vec<String>,
     pub js_files: Vec<String>,
     pub references: Vec<String>,
     pub warnings: Vec<String>,
@@ -177,6 +181,9 @@ pub fn validate_tree(root: &Path, icon: &str, limit: u64) -> Result<Report, Vali
                 return invalid(format!("{rel}: not a WebAssembly module"));
             }
             report.wasm_files.push(rel.clone());
+            if meta.len() >= COMPRESS_MIN_BYTES {
+                report.compressible.push(rel.clone());
+            }
         } else if rel.ends_with(".js") || rel.ends_with(".mjs") {
             report.js_files.push(rel.clone());
         }
@@ -341,7 +348,7 @@ pub fn check_serving(
                 "serving check: {rel} served as {ctype}, expected application/wasm"
             ));
         }
-        if enc.as_deref() != Some("gzip") {
+        if report.compressible.contains(rel) && enc.as_deref() != Some("gzip") {
             return invalid(format!("serving check: {rel} is not served compressed"));
         }
     }
@@ -378,6 +385,26 @@ mod tests {
     }
 
     const INDEX: &[u8] = b"<script type=module>import init from './app.js'; await init({ module_or_path: './app_bg.wasm' });</script>";
+
+    #[test]
+    fn only_modules_at_or_above_gzip_min_length_must_be_compressed() {
+        let mut small = b"\0asm".to_vec();
+        small.resize(COMPRESS_MIN_BYTES as usize - 1, 0);
+        let mut large = b"\0asm".to_vec();
+        large.resize(COMPRESS_MIN_BYTES as usize, 0);
+        let d = site(&[
+            ("index.html", b"<html>"),
+            ("small.wasm", &small),
+            ("large.wasm", &large),
+        ]);
+        let r = validate_tree(d.path(), "", 1 << 30).unwrap();
+        assert_eq!(r.compressible, ["large.wasm"]);
+        let conf = include_str!("../../server/nginx.conf");
+        assert!(
+            conf.contains(&format!("gzip_min_length {COMPRESS_MIN_BYTES};")),
+            "keep in sync with nginx.conf"
+        );
+    }
 
     #[test]
     fn valid_site_lists_assets_and_references() {
