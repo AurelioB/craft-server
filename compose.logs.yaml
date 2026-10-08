@@ -1,7 +1,7 @@
-# Optional: persistent updater logs in LOG_DIR in addition to container logs.
+# Optional: persistent logs in LOG_DIR in addition to container logs.
 # Enable with COMPOSE_FILE=compose.yaml:compose.logs.yaml in .env.
 services:
-  updater:
+  host:
     environment:
       CRAFT_LOG_DIR: /srv/logs
       CRAFT_HOST_LOG_DIR: ${LOG_DIR}

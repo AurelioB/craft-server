@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="same-origin">
+  <title>Craft Apps — Updates</title>
+  <link rel="stylesheet" href="admin.css">
+  <script type="module" src="admin.js"></script>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Updates</h1>
+      <p class="muted" id="who"></p>
+    </div>
+    <div class="header-actions">
+      <span id="running" class="badge" hidden></span>
+      <button id="logout" hidden>Sign out</button>
+    </div>
+  </header>
+  <main>
+    <p id="error" class="error" role="alert" hidden></p>
+    <table id="apps">
+      <thead>
+        <tr><th>App</th><th>Active</th><th>Latest</th><th>Waiting</th><th>Policy</th><th>Last check</th><th>Actions</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <section>
+      <h2>Recent actions</h2>
+      <ul id="results" class="log"></ul>
+    </section>
+    <section>
+      <h2>History</h2>
+      <ul id="history" class="log"></ul>
+    </section>
+  </main>
+</body>
+</html>

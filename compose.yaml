@@ -1,76 +1,35 @@
 # Craft Apps Host. Configure through .env (copy .env.example); see README.md and docs/.
 #
-# Two independently restartable services:
-#   web      unprivileged nginx; reads DATA_DIR read-only; serves the launcher and app releases
-#   updater  downloads, verifies and publishes official releases; no published ports
-#
-# Neither service needs the Docker socket, privileged mode, GPUs or a database.
+# One service: a single static binary that serves the apps under /<app>/, keeps them updated
+# from their official GitHub releases in the background, and offers /admin.
+# It needs no Docker socket, privileged mode, GPU or database.
 
 name: craft-apps
 
-x-hardening: &hardening
-  read_only: true
-  cap_drop: [ALL]
-  security_opt: ["no-new-privileges:true"]
-  restart: unless-stopped
-
 services:
-  web:
-    <<: *hardening
-    image: ${WEB_IMAGE:-nginxinc/nginx-unprivileged:1.29-alpine}
-    user: "${WEB_UID:-${RUN_UID:?set RUN_UID in .env}}:${WEB_GID:-${RUN_GID:?set RUN_GID in .env}}"
+  host:
+    build: ./host
+    image: ${IMAGE:-craft-apps-host:local}
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    user: "${RUN_UID:?set RUN_UID in .env}:${RUN_GID:?set RUN_GID in .env}"
     group_add:
-      - "${WEB_SUPPLEMENTAL_GID:-${WEB_GID:-${RUN_GID}}}"
-    # Run nginx directly: the image's entrypoint scripts would try to edit its default config.
-    entrypoint: ["nginx", "-c", "/etc/nginx/craft/nginx.conf", "-g", "daemon off;"]
-    working_dir: ${WEB_WORKING_DIR:-/tmp}
+      - "${SUPPLEMENTAL_GID:-${RUN_GID}}"
+    command: ["serve"]
+    working_dir: ${WORKING_DIR:-/srv/work}
     tmpfs:
       - /tmp:mode=1777,size=16m
     ports:
-      - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-8080}:8080"
-    volumes:
-      - type: bind
-        source: ./server
-        target: /etc/nginx/craft
-        read_only: true
-      - type: bind
-        source: ./launcher
-        target: /srv/launcher
-        read_only: true
-      - type: bind
-        source: ${DATA_DIR:?set DATA_DIR in .env}
-        target: /srv/data
-        read_only: true
-        bind:
-          create_host_path: false
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 5s
-
-  updater:
-    <<: *hardening
-    build: ./updater
-    image: ${UPDATER_IMAGE:-craft-apps-updater:local}
-    init: true
-    user: "${UPDATER_UID:-${RUN_UID:?set RUN_UID in .env}}:${UPDATER_GID:-${RUN_GID:?set RUN_GID in .env}}"
-    group_add:
-      - "${UPDATER_SUPPLEMENTAL_GID:-${UPDATER_GID:-${RUN_GID}}}"
-    command: ["daemon"]
-    working_dir: ${UPDATER_WORKING_DIR:-/srv/work}
-    tmpfs:
-      - /tmp:mode=1777,size=16m
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-8080}:8080"
     environment:
       FILE_UMASK: ${FILE_UMASK:-0022}
       CRAFT_LOG_LEVEL: ${LOG_LEVEL:-info}
-      # Identities and host paths, used only by `doctor` for compatibility checks.
-      CRAFT_UPDATER_UID: ${UPDATER_UID:-${RUN_UID}}
-      CRAFT_UPDATER_GID: ${UPDATER_GID:-${RUN_GID}}
-      CRAFT_WEB_UID: ${WEB_UID:-${RUN_UID}}
-      CRAFT_WEB_GID: ${WEB_GID:-${RUN_GID}}
-      CRAFT_WEB_GROUPS: ${WEB_SUPPLEMENTAL_GID:-}
+      # Used only by `doctor` for checks and preparation hints.
+      RUN_UID: ${RUN_UID}
+      RUN_GID: ${RUN_GID}
       CRAFT_HOST_CONFIG_DIR: ${CONFIG_DIR}
       CRAFT_HOST_DATA_DIR: ${DATA_DIR}
       CRAFT_HOST_STATE_DIR: ${STATE_DIR}
@@ -104,8 +63,8 @@ services:
         bind:
           create_host_path: false
     healthcheck:
-      test: ["CMD", "/usr/local/bin/craft-updater", "healthcheck"]
-      interval: 60s
+      test: ["CMD", "/usr/local/bin/craft-host", "healthcheck"]
+      interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 20s
