@@ -24,7 +24,7 @@ function logo(app) {
 
 // "PhotoCraft" → "Photo" + accented "Craft", as on getartcraft.com.
 function title(app) {
-  const h = el("h3", { class: "name font-display" });
+  const h = el("h2", { class: "name font-display" });
   const m = /^(.+?)(Craft)$/.exec(app.name);
   if (m) h.append(m[1], el("span", { class: "accent" }, m[2]));
   else h.textContent = app.name;

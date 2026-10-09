@@ -133,23 +133,7 @@ a { color: inherit; }
 
 @media (max-width: 40rem) { #summary { display: none; } }
 
-/* Hero */
-.hero { padding: clamp(3rem, 8vw, 6rem) 0 clamp(2rem, 5vw, 3.5rem); }
-.hero .hud-label { color: var(--muted); }
-
-.hero h1 {
-  margin: 1rem 0 0;
-  max-width: 18ch;
-  font-size: clamp(2.25rem, 6vw, 4.5rem);
-  line-height: 1;
-}
-
-.lede {
-  margin: 1.25rem 0 0;
-  max-width: 40rem;
-  color: var(--muted);
-  font-size: 1.125rem;
-}
+.lineup { padding-top: clamp(1.5rem, 4vw, 2.5rem); }
 
 /* Notices */
 #notices:empty { display: none; }
@@ -173,14 +157,14 @@ a { color: inherit; }
   border-bottom: 1px solid var(--line);
 }
 
-/* Hairlines come from each card's shadow (right and bottom) so a partly filled last row leaves
-   blank paper rather than a grey block; the outer right edge is clipped. */
+#lineup-title { color: var(--muted); }
+
+/* Hairlines: the grid draws the left edge, every card its right and bottom edges, the section
+   head the top. A partly filled last row leaves blank paper after its last card. */
 .grid {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 1px;
-  padding-bottom: 1px;
-  overflow: hidden;
+  border-left: 1px solid var(--line);
 }
 
 @media (min-width: 40rem) { .grid { grid-template-columns: repeat(2, 1fr); } }
@@ -188,10 +172,12 @@ a { color: inherit; }
 
 .placeholder {
   margin: 0;
-  padding: 2rem 0;
+  padding: 2rem 1.5rem;
   background: var(--bg);
   color: var(--muted);
   grid-column: 1 / -1;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
 }
 
 .app {
@@ -203,7 +189,8 @@ a { color: inherit; }
   min-height: 24rem;
   padding: 1.5rem;
   background: var(--bg);
-  box-shadow: 1px 0 0 var(--line), 0 1px 0 var(--line);
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
   text-decoration: none;
   transition: background-color .2s ease;
 }
