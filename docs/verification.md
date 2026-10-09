@@ -59,7 +59,7 @@ The previous two-service deployment (directories under a path with a space, `RUN
   token (one request per app; GitHub counts unauthenticated `304`s), plus manual checks; the
   60-per-hour quota is per public IP address and may also have been used by other clients there.
   After the scheduling change, the restarted demo logged "last check is recent; next check at …"
-  and sent no request.
+  (now worded "no app is due for a check; next check at …") and sent no request.
 - Earlier, with `[admin] host = "admin.localhost"`, `/admin` answered only to requests for that
   host name (404 for `localhost` and the LAN address). Browsers resolve `*.localhost` to their own
   loopback address, so the name reached the server only from a browser on the server itself.
@@ -69,6 +69,13 @@ The previous two-service deployment (directories under a path with a space, `RUN
 On the single-binary server all seven apps loaded from their versioned URLs with no failed
 requests and no page errors; WebAssembly was delivered as `application/wasm` with gzip
 (Chromium offers Brotli only over HTTPS).
+
+With stable URLs (`/<app>/` serving the active release), signed in as a user over the LAN
+address, all seven apps loaded at `/<app>/` with no failed requests, no page errors and no
+request to a versioned path. On the next start with the new retention defaults the demo logged
+"retention removed 0.3.0" (PhotoCraft) and "retention removed 0.2.1" (LightCraft), leaving one
+release per app. Not exercised: a tab kept open across an activation (lazy loading and saving
+after the switch).
 
 Results from the earlier nginx-based deployment, same releases (the app files are byte-identical;
 only the server changed):

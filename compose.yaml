@@ -9,7 +9,7 @@ name: craft-apps
 services:
   host:
     build: ./host
-    image: ${IMAGE:-craft-apps-host:local}
+    image: ${IMAGE:-ghcr.io/aureliob/craft-host:latest}
     init: true
     read_only: true
     cap_drop: [ALL]

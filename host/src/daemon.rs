@@ -136,7 +136,7 @@ fn updater_loop(cfg: Arc<Config>, activity: Arc<Activity>, phase: Arc<Mutex<Stri
     let mut next = first_run(&cfg, &updater.store);
     if next > now_epoch() {
         log::info!(
-            "last check is recent; next check at {}",
+            "no app is due for a check; next check at {}",
             crate::timeutil::iso(next)
         );
     }

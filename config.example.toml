@@ -1,5 +1,6 @@
 # Craft Apps Host configuration. Copy to CONFIG_DIR/config.toml.
-# Every setting is optional; the values shown are the defaults. Unknown keys are rejected.
+# Global settings and built-in app overrides are optional; new apps need name, repository and
+# artifact_patterns. Values shown below are defaults. Unknown keys are rejected.
 # Sizes accept bytes or units ("512MiB", "2GiB"); durations accept seconds or "30s"/"15m"/"1h"/"1d".
 
 [server]
@@ -21,11 +22,12 @@ retry_backoff_max = "5m"
 github_api_url = "https://api.github.com"
 # Optional token: raises the API limit from 60 to 5000 requests per hour, and unchanged release
 # lists then cost no quota. Without one, every check counts against the 60 per hour shared by
-# everything on this public IP address. A path relative to CONFIG_DIR, readable by the server
-# only. The value is never logged or printed.
+# everything on this public IP address. Relative paths resolve in CONFIG_DIR; absolute paths
+# are also accepted. Keep the file readable only by the server. The token is never logged.
 github_token_file = ""
-# When a downloaded release goes live for new visitors: "immediate", or "idle" = once the app
-# has received no requests for `idle_after`. Open tabs keep the release they loaded either way.
+# When a downloaded release goes live at the app's URL: "immediate", or "idle" = once the app
+# has received no requests for `idle_after`. A tab opened before the switch keeps its page but
+# loads later files from the new release; reload it after an update (see docs/operations.md).
 # Idle detection only sees requests: an app left open in a tab may make none for hours.
 activation = "immediate"
 idle_after = "30m"
@@ -65,7 +67,7 @@ apps = "public"
 session_ttl = "12h"
 cookie_secure = "auto"         # auto (Secure when the client used HTTPS) | always | never
 # Roles from the provider's groups (OIDC groups claim / proxy groups header).
-# proxy: required, admins are these accounts or members of these groups.
+# proxy: when [admin] is enabled, at least one admin account or group must be specified.
 # oidc: optional; when any list is set, the provider decides roles at every sign-in,
 # otherwise roles are managed in /admin and new OIDC accounts get the user role.
 admin_users = []
@@ -103,7 +105,7 @@ host = ""
 #
 # [apps.photocraft]
 # enabled = true
-# auto_update = true            # false: install once, then only on `update`
+# auto_update = true            # false: install initially, then upgrade only on manual commands
 # pinned_version = ""           # e.g. "0.5.0"; a pin set in /admin or the CLI takes precedence
 # channel = "stable"            # or "prerelease"
 # entry = "photocraft"          # stable URL path: /photocraft/

@@ -43,7 +43,7 @@ instead of Docker creating root-owned ones. Nothing ever changes ownership. Crea
 sudo install -d -o "$RUN_UID" -g "$RUN_GID" -m 2775 \
   /srv/craft-apps/config /srv/craft-apps/data /srv/craft-apps/state \
   /srv/craft-apps/cache /srv/craft-apps/work
-cp config.example.toml /srv/craft-apps/config/config.toml
+sudo install -m 0640 -o "$RUN_UID" -g "$RUN_GID" config.example.toml /srv/craft-apps/config/config.toml
 ```
 
 Optional GitHub token (raises the API limit from 60 to 5000 requests per hour, and unchanged
