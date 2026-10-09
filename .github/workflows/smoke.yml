@@ -64,6 +64,7 @@ jobs:
             --mount type=bind,src="$base/work",dst=/srv/work \
             "$IMAGE"
           for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8080/healthz && break; sleep 1; done
+          curl -fsS http://127.0.0.1:8080/healthz   # fails the step if never healthy
           curl -fsS -o /dev/null http://127.0.0.1:8080/
           docker exec smoke /usr/local/bin/craft-host --version
           docker exec smoke /usr/local/bin/craft-host doctor --offline
@@ -84,6 +85,7 @@ jobs:
           docker compose pull
           docker compose up -d --no-build
           for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8081/healthz && break; sleep 2; done
+          curl -fsS http://127.0.0.1:8081/healthz   # fails the step if never healthy
           curl -fsS -o /dev/null http://127.0.0.1:8081/
           docker compose exec -T host craft-host doctor --offline
           docker compose ps
