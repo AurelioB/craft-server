@@ -1,0 +1,70 @@
+name: Smoke test published image
+
+# Pulls a published tag from GHCR and runs it the way the README describes: non-root user,
+# read-only root, bind mounts, then checks /healthz and the launcher (amd64) and --version (arm64).
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Image tag to test, e.g. 0.1.0 or latest
+        required: true
+        default: latest
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+
+permissions:
+  packages: read
+
+jobs:
+  smoke:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ghcr.io/aureliob/craft-host:${{ inputs.tag || 'edge' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image tags for a tag release
+        if: github.event_name == 'workflow_run' && startsWith(github.event.workflow_run.head_branch, 'v')
+        run: echo "IMAGE=ghcr.io/aureliob/craft-host:${GITHUB_REF_NAME_OVERRIDE#v}" >> "$GITHUB_ENV"
+        env:
+          GITHUB_REF_NAME_OVERRIDE: ${{ github.event.workflow_run.head_branch }}
+      - name: Inspect manifest
+        run: docker buildx imagetools inspect "$IMAGE"
+      - name: Run as in the README (amd64)
+        run: |
+          base=$(mktemp -d)
+          mkdir -p "$base"/{config,data,state,cache,work}
+          {
+            printf '[updater]\ncheck_on_startup = false\n'
+            for a in photocraft vectorcraft filmcraft lightcraft pdfcraft effectcraft designcraft; do
+              printf '[apps.%s]\nenabled = false\n' "$a"
+            done
+          } > "$base/config/config.toml"
+          sudo chown -R 1000:10000 "$base"
+          sudo chmod 0750 "$base/config" && sudo chmod 0640 "$base/config/config.toml"
+          docker run -d --name smoke --init --platform linux/amd64 \
+            --user 1000:10000 --group-add 10000 \
+            --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --workdir /srv/work --tmpfs /tmp:mode=1777,size=16m \
+            -p 127.0.0.1:8080:8080 -e FILE_UMASK=0002 \
+            --mount type=bind,src="$base/config",dst=/config,readonly \
+            --mount type=bind,src="$base/data",dst=/srv/data \
+            --mount type=bind,src="$base/state",dst=/srv/state \
+            --mount type=bind,src="$base/cache",dst=/srv/cache \
+            --mount type=bind,src="$base/work",dst=/srv/work \
+            "$IMAGE"
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8080/healthz && break; sleep 1; done
+          curl -fsS -o /dev/null http://127.0.0.1:8080/
+          docker exec smoke /usr/local/bin/craft-host --version
+          docker exec smoke /usr/local/bin/craft-host doctor --offline
+          docker logs smoke
+          docker rm -f smoke
+      - name: Version (arm64, emulated)
+        run: docker run --rm --platform linux/arm64 "$IMAGE" --version
