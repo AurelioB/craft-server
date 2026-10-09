@@ -45,6 +45,13 @@ sudo install -m 0640 -o 1000 -g 10000 config.example.toml /srv/craft-apps/config
 docker compose pull && docker compose up -d
 ```
 
+If the image package is private (it follows the repository's visibility), log in first with a
+GitHub token that has the `read:packages` scope:
+
+```sh
+echo "$GITHUB_TOKEN" | docker login ghcr.io -u <github-user> --password-stdin
+```
+
 Change the directory command to match your `.env` if you changed the sample paths or
 identity. Bind-mount sources must exist; Compose does not create or chown them.
 `/config` is read-only in the container; data, state, cache and work are writable by
