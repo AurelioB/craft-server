@@ -9,6 +9,11 @@ permissions:
   contents: write
   packages: write
 
+# One build per branch or tag; a newer push to main replaces an unfinished edge build.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
+
 jobs:
   image:
     runs-on: ubuntu-latest
