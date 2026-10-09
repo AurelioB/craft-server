@@ -46,8 +46,9 @@ sudo install -d -o "$RUN_UID" -g "$RUN_GID" -m 2775 \
 cp config.example.toml /srv/craft-apps/config/config.toml
 ```
 
-Optional GitHub token (raises the API limit from 60 to 5000 requests per hour; not needed for
-hourly checks of seven apps thanks to conditional requests):
+Optional GitHub token (raises the API limit from 60 to 5000 requests per hour, and unchanged
+release lists then cost no quota). Hourly checks of seven apps use 7 requests per hour without
+one, but the 60 are shared by everything behind the same public IP address:
 
 ```sh
 install -m 0400 -o "$RUN_UID" /dev/stdin /srv/craft-apps/config/github-token <<<"github_pat_…"

@@ -12,10 +12,14 @@ Both take the same lock as scheduled updates. A manual command waits up to `lock
 
 ## How updates work
 
-On startup and every `check_interval` (default 1 hour) the background updater, for each enabled
-app:
+The background updater checks each enabled app every `check_interval` (default 1 hour), counted
+from that app's last successful check; the schedule carries over restarts, so restarting the
+container does not check again. An app whose check failed waits for its retry deadline (backoff,
+or GitHub's rate-limit reset) without re-checking the others. For each app that is due it:
 
-1. Lists recent releases (conditional request: unchanged lists cost no API quota).
+1. Lists recent releases: one GitHub API request per app (conditional, with the last `ETag`).
+   Without a token every request counts against GitHub's 60 per hour per public IP address,
+   shared with anything else on that address; with a token, unchanged lists (`304`) are free.
 2. Picks the newest release that is not a draft, not a pre-release (GitHub flag *or* a semver
    suffix such as `-rc.5`), and has exactly one asset matching the app's artifact patterns.
 3. Skips it if it is not newer than the active release, is blocked by a rollback, or the app is

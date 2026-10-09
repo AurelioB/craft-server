@@ -12,7 +12,7 @@ use crate::activity::Activity;
 use crate::config::Config;
 use crate::ops::{Outcome, Updater};
 use crate::server::{self, Shared};
-use crate::store::Store;
+use crate::store::{AppState, Store};
 use crate::timeutil::now_epoch;
 
 /// Minimum delay between cycles after transient failures.
@@ -20,10 +20,18 @@ const MIN_RETRY_SECS: i64 = 30;
 /// How often pending releases are re-evaluated for idle activation.
 const ACTIVATION_TICK_SECS: i64 = 60;
 
-/// Run one update cycle over all enabled apps.
+/// Run one update cycle. Scheduled cycles (`manual = false`) only check apps that are due (see
+/// [`due_at`]), so a retry for one app does not query GitHub again for all the others.
 pub fn cycle(cfg: &Config, updater: &Updater, manual: bool) -> Vec<(String, Outcome)> {
     let mut results = Vec::new();
+    let now = now_epoch();
     for app in cfg.enabled_apps() {
+        if !manual
+            && let Ok(st) = updater.store.load(&app.id)
+            && due_at(cfg, &st, now) > now
+        {
+            continue;
+        }
         let outcome = updater.update_app(app, manual);
         match &outcome {
             Outcome::Failed(_) => log::warn!("{}: {outcome}", app.id),
@@ -37,17 +45,43 @@ pub fn cycle(cfg: &Config, updater: &Updater, manual: bool) -> Vec<(String, Outc
     results
 }
 
+/// When an app's next scheduled check is due: `check_interval` after its last successful check
+/// (at once if it never had one or the last one failed), and never before a retry deadline set
+/// after failures (backoff, or GitHub's rate-limit reset).
+pub fn due_at(cfg: &Config, st: &AppState, now: i64) -> i64 {
+    let base = match (st.last_check_ok, st.last_check.as_deref()) {
+        (Some(true), Some(at)) => crate::timeutil::parse_iso(at)
+            .map_or(now, |t| t + cfg.updater.check_interval_secs as i64),
+        _ => now,
+    };
+    base.max(st.retry_after.unwrap_or(i64::MIN))
+}
+
+fn earliest_due(cfg: &Config, store: &Store, now: i64) -> i64 {
+    cfg.enabled_apps()
+        .map(|app| match store.load(&app.id) {
+            Ok(st) => due_at(cfg, &st, now),
+            Err(_) => now,
+        })
+        .min()
+        .unwrap_or(now + cfg.updater.check_interval_secs as i64)
+}
+
 fn next_run(cfg: &Config, store: &Store) -> i64 {
     let now = now_epoch();
-    let mut next = now + cfg.updater.check_interval_secs as i64;
-    for app in cfg.enabled_apps() {
-        if let Ok(st) = store.load(&app.id)
-            && let Some(at) = st.retry_after
-        {
-            next = next.min(at.max(now + MIN_RETRY_SECS));
-        }
+    earliest_due(cfg, store, now).max(now + MIN_RETRY_SECS)
+}
+
+/// When the first scheduled check runs after a start. Restarts must not cost API requests:
+/// without a token every request counts against GitHub's 60 per hour, conditional ones too. With
+/// `check_on_startup` the schedule simply continues, so only apps that are due are checked at
+/// once; without it the first check waits a full `check_interval`.
+pub fn first_run(cfg: &Config, store: &Store) -> i64 {
+    let now = now_epoch();
+    if !cfg.updater.check_on_startup {
+        return now + cfg.updater.check_interval_secs as i64;
     }
-    next
+    earliest_due(cfg, store, now).max(now)
 }
 
 /// Activate pending releases whose apps have been idle long enough. Never waits for the lock.
@@ -84,11 +118,13 @@ fn updater_loop(cfg: Arc<Config>, activity: Arc<Activity>, phase: Arc<Mutex<Stri
         }
         Err(e) => log::warn!("{e:#}"),
     }
-    let mut next = if cfg.updater.check_on_startup {
-        now_epoch()
-    } else {
-        now_epoch() + cfg.updater.check_interval_secs as i64
-    };
+    let mut next = first_run(&cfg, &updater.store);
+    if next > now_epoch() {
+        log::info!(
+            "last check is recent; next check at {}",
+            crate::timeutil::iso(next)
+        );
+    }
     let mut next_tick = now_epoch() + ACTIVATION_TICK_SECS;
     loop {
         let now = now_epoch();

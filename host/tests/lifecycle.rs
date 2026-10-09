@@ -847,3 +847,53 @@ fn backfill_adds_copies_to_older_releases_and_cleans_interrupted_runs() {
         "nothing left to do"
     );
 }
+
+#[test]
+fn restarts_and_retries_only_query_github_for_apps_that_are_due() {
+    use craft_host::daemon::{cycle, first_run};
+    use craft_host::timeutil::now_epoch;
+    let gh = FakeGitHub::start();
+    let e = env(&gh);
+    gh.publish(
+        REPO,
+        "v1.0.0",
+        release_zip(&e.root(), "1.0.0", &[]),
+        PublishOpts::default(),
+    );
+    let route = format!("/repos/{REPO}/releases");
+    let u = Updater::new(&e.cfg);
+    u.prepare().unwrap();
+    let interval = e.cfg.updater.check_interval_secs as i64;
+
+    // Never checked: due at once.
+    assert!(first_run(&e.cfg, &u.store) <= now_epoch());
+    cycle(&e.cfg, &u, false);
+    assert_eq!(e.current().as_deref(), Some("1.0.0"));
+    let after_install = gh.hits(&route);
+
+    // A restart right after a good check continues the schedule instead of checking again.
+    assert!(first_run(&e.cfg, &u.store) >= now_epoch() + interval - 5);
+    cycle(&e.cfg, &u, false);
+    assert_eq!(gh.hits(&route), after_install, "not due: no request");
+
+    // A failed check waits for its retry deadline (backoff or rate-limit reset).
+    let mut st = u.store.load("testcraft").unwrap();
+    st.last_check_ok = Some(false);
+    st.retry_after = Some(now_epoch() + 600);
+    u.store.save("testcraft", &st).unwrap();
+    let first = first_run(&e.cfg, &u.store);
+    assert!((now_epoch() + 595..=now_epoch() + 600).contains(&first), "{first}");
+    cycle(&e.cfg, &u, false);
+    assert_eq!(gh.hits(&route), after_install, "waiting for the retry deadline");
+
+    // Deadline passed: due again, one request.
+    st.retry_after = Some(now_epoch() - 1);
+    u.store.save("testcraft", &st).unwrap();
+    assert!(first_run(&e.cfg, &u.store) <= now_epoch());
+    cycle(&e.cfg, &u, false);
+    assert_eq!(gh.hits(&route), after_install + 1);
+
+    // Manual cycles (CLI `update`, /admin) always check.
+    cycle(&e.cfg, &u, true);
+    assert_eq!(gh.hits(&route), after_install + 2);
+}

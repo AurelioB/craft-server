@@ -9,6 +9,8 @@ listen = "0.0.0.0:8080"
 trusted_proxies = []           # e.g. ["172.16.0.0/12"]
 
 [updater]
+# Continue the schedule on startup: apps whose last successful check is older than
+# check_interval (or that never had one) are checked at once. false: wait a full interval.
 check_on_startup = true
 check_interval = "1h"          # at least 60s
 http_timeout = "30s"
@@ -17,8 +19,10 @@ max_retries = 3                # per request, with exponential backoff
 retry_backoff = "5s"
 retry_backoff_max = "5m"
 github_api_url = "https://api.github.com"
-# Optional token to raise the API rate limit (60/hour unauthenticated). A path relative to
-# CONFIG_DIR, readable by the server only. The value is never logged or printed.
+# Optional token: raises the API limit from 60 to 5000 requests per hour, and unchanged release
+# lists then cost no quota. Without one, every check counts against the 60 per hour shared by
+# everything on this public IP address. A path relative to CONFIG_DIR, readable by the server
+# only. The value is never logged or printed.
 github_token_file = ""
 # When a downloaded release goes live for new visitors: "immediate", or "idle" = once the app
 # has received no requests for `idle_after`. Open tabs keep the release they loaded either way.
