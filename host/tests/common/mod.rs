@@ -44,11 +44,23 @@ fn handle(mut stream: TcpStream, state: Arc<Mutex<ServerState>>) {
         return;
     }
     let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
+    let mut content_length = 0usize;
     loop {
         let mut h = String::new();
         if reader.read_line(&mut h).is_err() || h == "\r\n" || h.is_empty() {
             break;
         }
+        if let Some((k, v)) = h.split_once(':')
+            && k.trim().eq_ignore_ascii_case("content-length")
+        {
+            content_length = v.trim().parse().unwrap_or(0);
+        }
+    }
+    // Consume the request body (OIDC token requests are POSTs): closing a socket with unread
+    // data makes the kernel reset the connection, and the client may lose the response.
+    let mut body = vec![0u8; content_length];
+    if reader.read_exact(&mut body).is_err() {
+        return;
     }
     let route = path.split('?').next().unwrap().to_string();
     let (status, body, behavior) = {

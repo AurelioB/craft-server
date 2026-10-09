@@ -588,11 +588,19 @@ fn basic_auth_protects_admin_by_role_and_leaves_public_apps_open() {
     assert_eq!(get(&format!("{u}/status.json"), &[]).status, 200);
 }
 
+#[track_caller]
 fn session_from(r: &Resp) -> String {
     r.cookies()
         .into_iter()
         .find(|c| c.starts_with("craft_session="))
-        .expect("session cookie")
+        .unwrap_or_else(|| {
+            panic!(
+                "no session cookie: {} location={:?} body={}",
+                r.status,
+                r.header("location"),
+                r.text()
+            )
+        })
 }
 
 fn form_login(u: &str, user: &str, pw: &str, next: &str) -> Resp {
