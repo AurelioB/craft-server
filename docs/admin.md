@@ -102,9 +102,13 @@ Run them with `docker compose exec -T host craft-host user …` (`-T` passes sta
 - Changes apply at once to existing sessions, also when made from the CLI: a new role is used on
   the next request; a new password, a removed identity or a deleted account ends that account's
   sessions.
-- The last administrator cannot be demoted or deleted, and nobody can delete their own account.
-  To recover a lost administrator password: `craft-host user set-password NAME`, or add another
-  administrator with `craft-host user add`.
+- The last administrator cannot be demoted or deleted in **Users** or with the CLI, and nobody
+  can delete their own account. Exception, by design: with provider roles (`admin_groups` etc.)
+  an OIDC sign-in applies the provider's role even to the last administrator.
+- Recovery: `craft-host user set-password NAME` for a lost password, or
+  `craft-host user add NAME --role admin` for a new administrator. With `methods = ["oidc"]`
+  only, passwords do not help: promote an account that is linked to the provider with
+  `craft-host user set-role NAME admin` (or fix the provider's groups when roles come from it).
 - Sessions are kept in memory: a restart signs everyone out.
 
 ## Sign-in methods
