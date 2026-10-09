@@ -21,7 +21,9 @@ use crate::config::{AppConfig, Config};
 use crate::layout::{self, MARKER, valid_release_name};
 use crate::login;
 use crate::oidc::Oidc;
-use crate::serve::{CachePolicy, redirect, serve_dir, set_common_headers, simple};
+use crate::serve::{
+    CachePolicy, fallback_allowed, redirect, release_path, serve_dir, set_common_headers, simple,
+};
 use crate::status;
 use crate::store::Store;
 use crate::users::UserDb;
@@ -142,7 +144,18 @@ fn installing() -> Response<Body> {
     res
 }
 
-/// Everything under `/<entry>/…`.
+/// A retained release directory named by the first path segment, e.g. `0.5.0`.
+fn retained_release(s: &Shared, app: &AppConfig, segment: &str) -> Option<std::path::PathBuf> {
+    let root = s.cfg.release_root(app).join(segment);
+    (valid_release_name(segment) && root.join(MARKER).is_file()).then_some(root)
+}
+
+/// Everything under `/<entry>/…`:
+/// - `/<entry>/<path>` serves the active release at the app's stable URL;
+/// - `/<entry>/<version>/<path>` serves that retained release (immutable, cached for a year).
+///
+/// A file missing from the active release is looked up in the other retained releases, newest
+/// first: a tab opened before an update may still load content-hashed files of its release.
 async fn app_request(State(s): State<Arc<Shared>>, req: Request) -> Response<Body> {
     if req.method() != Method::GET && req.method() != Method::HEAD {
         return simple(StatusCode::METHOD_NOT_ALLOWED, "method not allowed\n");
@@ -153,37 +166,69 @@ async fn app_request(State(s): State<Arc<Shared>>, req: Request) -> Response<Bod
         .query()
         .map(|q| format!("?{q}"))
         .unwrap_or_default();
-    let mut parts = path.trim_start_matches('/').splitn(3, '/');
+    let mut parts = path.trim_start_matches('/').splitn(2, '/');
     let entry = parts.next().unwrap_or("");
     let Some(app) = find_entry(&s.cfg, entry) else {
         return simple(StatusCode::NOT_FOUND, "not found\n");
     };
-    let version = parts.next();
-    let rest = parts.next();
-    match (version, rest) {
-        // /photocraft
-        (None, _) => redirect(StatusCode::MOVED_PERMANENTLY, &format!("{entry}/{query}")),
-        // /photocraft/
-        (Some(""), None) => {
-            s.activity.record(&app.id, None);
-            match layout::active_version(&s.cfg, app) {
-                Some(v) => redirect(StatusCode::FOUND, &format!("{v}/{query}")),
-                None => installing(),
+    // /photocraft
+    let Some(inner) = parts.next() else {
+        return redirect(StatusCode::MOVED_PERMANENTLY, &format!("{entry}/{query}"));
+    };
+    let (first, after) = match inner.split_once('/') {
+        Some((f, a)) => (f, Some(a)),
+        None => (inner, None),
+    };
+    if let Some(root) = retained_release(&s, app, first) {
+        return match after {
+            // /photocraft/0.5.0
+            None => redirect(StatusCode::MOVED_PERMANENTLY, &format!("{first}/{query}")),
+            // /photocraft/0.5.0/…
+            Some(rest) => {
+                s.activity.record(&app.id, Some(first));
+                serve_dir(
+                    root,
+                    &format!("/{rest}{query}"),
+                    req,
+                    CachePolicy::Immutable,
+                )
+                .await
             }
-        }
-        // /photocraft/0.5.0
-        (Some(v), None) => redirect(StatusCode::MOVED_PERMANENTLY, &format!("{v}/{query}")),
-        // /photocraft/0.5.0/…
-        (Some(v), Some(rest)) => {
-            let root = s.cfg.release_root(app).join(v);
-            if !valid_release_name(v) || !root.join(MARKER).is_file() {
-                return simple(StatusCode::NOT_FOUND, "not found\n");
-            }
-            s.activity.record(&app.id, Some(v));
-            let rest = format!("/{rest}{query}");
-            serve_dir(root, &rest, req, CachePolicy::Immutable).await
+        };
+    }
+    // /photocraft/… from the active release.
+    let Some(active) = layout::active_version(&s.cfg, app) else {
+        return if inner.is_empty() {
+            installing()
+        } else {
+            simple(StatusCode::NOT_FOUND, "not found\n")
+        };
+    };
+    let rest = format!("/{inner}{query}");
+    let releases = s.cfg.release_root(app);
+    let mut version = active;
+    if fallback_allowed(&rest)
+        && release_path(&releases.join(&version), &rest).is_some_and(|p| !p.exists())
+    {
+        let state = Store::new(&s.cfg.paths.state)
+            .load(&app.id)
+            .unwrap_or_default();
+        let mut others: Vec<_> = state
+            .installed
+            .iter()
+            .filter(|(v, _)| **v != version)
+            .collect();
+        others.sort_by(|a, b| b.1.installed_at.cmp(&a.1.installed_at));
+        if let Some((v, _)) = others.into_iter().find(|(v, _)| {
+            retained_release(&s, app, v).is_some()
+                && release_path(&releases.join(v.as_str()), &rest).is_some_and(|p| p.exists())
+        }) {
+            version = v.clone();
         }
     }
+    s.activity.record(&app.id, Some(&version));
+    let root = releases.join(&version);
+    serve_dir(root, &rest, req, CachePolicy::Current(version)).await
 }
 
 /// /admin answers only when enabled. With `[admin] host`, it lives only on that host name and the

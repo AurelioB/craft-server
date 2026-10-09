@@ -235,8 +235,9 @@ impl Stack {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
+    /// The release the stable URL serves.
     fn served(&self) -> String {
-        self.get("/testcraft/").location
+        self.get("/testcraft/version.txt").body
     }
 }
 
@@ -365,7 +366,8 @@ fn compose_stack_end_to_end() {
         s.get("/readyz/testcraft").status == 200
     });
     let r = s.get("/testcraft/?webgl");
-    assert_eq!((r.status, r.location.as_str()), (302, "1.0.0/?webgl"));
+    assert_eq!((r.status, r.location.as_str()), (200, ""));
+    assert_eq!(s.served(), "1.0.0");
     assert_eq!(s.get("/testcraft/1.0.0/version.txt").body, "1.0.0");
     assert_eq!(s.get("/testcraft/1.0.0/.craft-release.json").status, 404);
     assert!(s.get("/").body.contains("Craft Apps"));
@@ -426,11 +428,11 @@ fn compose_stack_end_to_end() {
         None,
     );
     assert_eq!(r.status, 202, "{}", r.body);
-    s.wait_for("update from admin", || s.served() == "1.1.0/");
+    s.wait_for("update from admin", || s.served() == "1.1.0");
     assert_eq!(
-        s.get("/testcraft/1.0.0/version.txt").body,
-        "1.0.0",
-        "open tabs keep their release"
+        s.get("/testcraft/1.0.0/version.txt").status,
+        404,
+        "by default only the active release is kept"
     );
     assert_eq!(s.started_at(), started, "no restart");
     let st: serde_json::Value = serde_json::from_str(
@@ -472,7 +474,7 @@ fn compose_stack_end_to_end() {
         1,
         "{outs}"
     );
-    assert_eq!(s.served(), "1.2.0/");
+    assert_eq!(s.served(), "1.2.0");
 
     // Disk exhaustion: WORK_DIR is a 1 MiB tmpfs; a 2 MiB incompressible release cannot fit.
     let noise: Vec<u8> = (0u32..(2 << 15))
@@ -497,7 +499,7 @@ fn compose_stack_end_to_end() {
     );
     assert_eq!(
         s.served(),
-        "1.2.0/",
+        "1.2.0",
         "a failed update keeps the working release"
     );
 
@@ -505,7 +507,7 @@ fn compose_stack_end_to_end() {
     s.ok(&["stop", "fakegh"]);
     s.ok(&["restart", "host"]);
     s.wait_for("server after restart", || s.get("/healthz").status == 200);
-    assert_eq!(s.served(), "1.2.0/");
+    assert_eq!(s.served(), "1.2.0");
     let out = s.compose(
         &[
             "exec",
@@ -568,7 +570,7 @@ fn compose_stack_end_to_end() {
         &foreign,
     );
     assert!(out.status.success(), "{out:?}");
-    assert_eq!(s.served(), "1.4.0/");
+    assert_eq!(s.served(), "1.4.0");
     let meta = fs::metadata(s.base.join("data/releases/testcraft/1.4.0/version.txt")).unwrap();
     use std::os::unix::fs::MetadataExt;
     assert_eq!(

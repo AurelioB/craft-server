@@ -60,8 +60,16 @@ one new visitors get:
   then the release is *pending*: shown in `/admin`, `status` and the launcher, and activated by a
   check that runs every minute.
 
-Either way, open tabs keep working: a tab that loaded `/photocraft/0.5.0/` keeps requesting files
-from that versioned path, which stays published.
+The app's URL never changes: `/photocraft/` serves whichever release is active. A tab opened
+before an activation keeps the page it loaded, but later requests (lazy-loaded scripts, workers,
+images) go to the new release. Asset files that only an older retained release has (for example
+content-hashed scripts) are served from it — never pages, directories, service workers
+(`sw.js`) or manifests, so an old entry point or worker cannot outlive its release. With the
+default retention nothing older is kept, so such a tab may need a reload (see
+[Retention](#retention)). Files whose names stay the same come from the new release, so an app
+that reuses file names (EffectCraft, LightCraft) can mix versions in a tab opened before the
+update until it is reloaded. `idle` activation avoids most of this by switching while nobody
+uses the app. Retained releases also stay reachable at `/photocraft/<version>/`.
 
 Idle detection only sees requests. The apps run in the browser and may make no requests for hours
 while someone works in them, so "idle" means "nobody has opened or reloaded the app recently",
@@ -95,7 +103,9 @@ configuration pin remains. An installed pin is activated even while GitHub is un
 ## Rollback and blocked releases
 
 Roll back in `/admin` or with `craft-host rollback photocraft [VERSION]` (default: the newest
-retained release older than the active one). The release that was active is blocked, so updates
+retained release older than the active one). This needs an older release on disk: set
+`keep_latest = 2` or more (globally or per app); with the default of 1 there is nothing to roll
+back to, and pinning an older version downloads it again. The release that was active is blocked, so updates
 do not reinstall it, until you allow it (`allow`; the next update reactivates it without
 downloading) or a newer eligible release is published. A pending release is discarded.
 
@@ -105,14 +115,19 @@ Documents and browser libraries need their own export or backup from inside each
 
 ## Retention
 
-Per app the updater keeps the active and pending releases, a pinned release, the `keep_latest`
-most recently installed releases (default 3), every release installed within `keep_days`
-(default 30), and every release that served requests within `keep_recently_used` (default 24 h,
-known only since the last restart). Others are removed after each successful update; removal
-moves the directory into `.staging` first, then deletes it.
+By default each app keeps one release: the active one. Per app the updater keeps the active and
+pending releases, a pinned release, the `keep_latest` most recently installed releases
+(default 1, counting the active one; set 2 or more to be able to roll back), every release
+installed within `keep_days` (default 0: none), and, with `keep_recently_used` (default 0: off,
+e.g. `"1h"`), a replaced release that served requests within that time, known only since the
+last restart — that is, while tabs opened before the update still load files that only it has.
+Retention runs after each update and with every scheduled check; a release that cannot be removed
+yet (published by another user id) is retried. Removal moves the directory into `.staging` first,
+then deletes it.
 
-Tabs opened on a release that retention has since removed fail to load further files from it;
-reloading the app's stable URL (`/photocraft/`) moves them to the active release.
+With the defaults, a tab opened before an update loses files that only the old release had (for
+example lazily loaded, content-hashed scripts) and may need a reload. A grace period or
+`keep_latest = 2` keeps them available.
 
 Downloaded archives in `CACHE_DIR/archives` are kept for reuse and pruned least-recently-used
 first above `cache_max_size`.

@@ -46,11 +46,14 @@ impl Activity {
         self.apps.lock().get(app).copied()
     }
 
+    /// Whether the release served a request within the last `secs` (0: never).
     pub fn release_used_within(&self, app: &str, version: &str, secs: u64) -> bool {
-        self.releases
-            .lock()
-            .get(&(app.to_string(), version.to_string()))
-            .is_some_and(|t| now_epoch() - t <= secs as i64)
+        secs > 0
+            && self
+                .releases
+                .lock()
+                .get(&(app.to_string(), version.to_string()))
+                .is_some_and(|t| now_epoch() - t <= secs as i64)
     }
 }
 

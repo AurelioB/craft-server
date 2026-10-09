@@ -346,7 +346,7 @@ impl<'a> Updater<'a> {
             outcome,
             Outcome::Installed(_) | Outcome::Activated(_) | Outcome::Staged(_)
         ) {
-            self.apply_retention(app)?;
+            self.retain_logged(app);
         }
         Ok(outcome)
     }
@@ -489,6 +489,14 @@ impl<'a> Updater<'a> {
         }
     }
 
+    /// Retention after a successful change: housekeeping, so it never turns the change into a
+    /// failure.
+    fn retain_logged(&self, app: &AppConfig) {
+        if let Err(e) = self.apply_retention(app) {
+            log::warn!("{}: retention failed: {e:#}", app.id);
+        }
+    }
+
     /// Activate a pending release if its app is idle (or `force`). Returns the activated version.
     pub fn apply_pending(&self, app: &AppConfig, force: bool) -> Result<Option<String>> {
         let mut state = self.store.load(&app.id)?;
@@ -505,7 +513,7 @@ impl<'a> Updater<'a> {
         };
         self.go_live(app, &mut state, &v, note)?;
         self.store.save(&app.id, &state)?;
-        self.apply_retention(app)?;
+        self.retain_logged(app);
         Ok(Some(v))
     }
 
@@ -712,10 +720,14 @@ impl<'a> Updater<'a> {
         let pin = self.effective_pin(app, &state);
         let horizon = now_epoch() - app.keep_days as i64 * 86_400;
         let recent = self.cfg.retention.keep_recently_used_secs;
+        // `keep_latest` counts the active release first, then the most recently installed.
+        let active = state.active.clone();
         let mut by_time: Vec<(&String, &InstalledRelease)> = state.installed.iter().collect();
         by_time.sort_by(|a, b| {
-            b.1.installed_at
-                .cmp(&a.1.installed_at)
+            let is_active = |v: &String| active.as_deref() == Some(v.as_str());
+            is_active(b.0)
+                .cmp(&is_active(a.0))
+                .then_with(|| b.1.installed_at.cmp(&a.1.installed_at))
                 .then_with(|| cmp_text(b.0, a.0))
         });
         let keep: Vec<String> = by_time
@@ -723,7 +735,8 @@ impl<'a> Updater<'a> {
             .enumerate()
             .filter(|(i, (v, r))| {
                 *i < app.keep_latest as usize
-                    || parse_iso(&r.installed_at).is_some_and(|t| t >= horizon)
+                    || (app.keep_days > 0
+                        && parse_iso(&r.installed_at).is_some_and(|t| t >= horizon))
                     || state.active.as_deref() == Some(v.as_str())
                     || state.pending.as_deref() == Some(v.as_str())
                     || pin.as_deref() == Some(v.as_str())
@@ -740,18 +753,31 @@ impl<'a> Updater<'a> {
             .filter(|v| !keep.contains(v))
             .cloned()
             .collect();
-        for v in &remove {
-            let trashed = layout::trash(self.cfg, app, v)?;
-            state.installed.remove(v);
+        let mut removed = Vec::new();
+        for v in remove {
+            // A release published under another user id (CLI as a different member of the shared
+            // group) may not be removable here; the server retries at its next check.
+            let trashed = match layout::trash(self.cfg, app, &v) {
+                Ok(t) => t,
+                Err(e) => {
+                    log::warn!("{}: retention cannot remove {v} yet: {e:#}", app.id);
+                    continue;
+                }
+            };
+            state.installed.remove(&v);
             self.store.save(&app.id, &state)?;
-            if let Some(t) = trashed {
-                remove_tree(&t).with_context(|| format!("delete {}", t.display()))?;
+            if let Some(t) = trashed
+                && let Err(e) = remove_tree(&t)
+            {
+                // Left in staging; startup reconciliation clears it.
+                log::warn!("{}: delete {}: {e:#}", app.id, t.display());
             }
             self.store
-                .record(&app.id, "retention", "removed", Some(v), "")?;
+                .record(&app.id, "retention", "removed", Some(&v), "")?;
             log::info!("{}: retention removed {v}", app.id);
+            removed.push(v);
         }
-        Ok(remove)
+        Ok(removed)
     }
 
     /// Delete least recently used archives until the cache fits `cache_max_size`.

@@ -42,9 +42,10 @@ max_compression_ratio = 200
 min_free_space = "256MiB"      # kept free on DATA_DIR, WORK_DIR and CACHE_DIR
 
 [retention]
-keep_latest = 3                # most recently installed releases kept per app
-keep_days = 30                 # plus every release installed within this many days
-keep_recently_used = "24h"     # plus releases that served requests this recently (open tabs)
+keep_latest = 1                # releases kept per app, counting the active one; 2+ allows rollback
+keep_days = 0                  # plus every release installed within this many days (0: none)
+keep_recently_used = "0"       # e.g. "1h": also keep a replaced release while tabs opened before the
+                               # update still load files only it has (0: no grace period)
 cache_max_size = "2GiB"        # downloaded archives (least recently used are removed)
 
 [auth]
@@ -109,8 +110,8 @@ host = ""
 # release_dir = "releases/photocraft"   # relative to DATA_DIR
 # activation = "immediate"      # or "idle"
 # idle_after = "30m"
-# keep_latest = 3
-# keep_days = 30
+# keep_latest = 1
+# keep_days = 0
 # origin = ""                   # e.g. "https://lightcraft.example.net": link the app on its own
 #                               # host name so it gets separate browser storage
 #

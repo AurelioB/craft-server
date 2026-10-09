@@ -201,10 +201,30 @@ fn apps_are_served_under_stable_and_versioned_paths() {
 
     let r = get(&format!("{u}/testcraft"), &[]);
     assert_eq!((r.status, r.header("location")), (301, Some("testcraft/")));
+    // The stable URL serves the active release itself; the query string stays with the page.
     let r = get(&format!("{u}/testcraft/?webgl"), &[]);
     assert_eq!(
         (r.status, r.header("location"), r.header("cache-control")),
-        (302, Some("1.0.0/?webgl"), Some("no-cache"))
+        (200, None, Some("no-cache"))
+    );
+    assert!(r.text().contains("<html"), "{}", r.text());
+    let big = get(&format!("{u}/testcraft/big.js"), &[]);
+    assert_eq!(
+        (big.status, big.header("cache-control")),
+        (200, Some("no-cache"))
+    );
+    assert!(
+        big.header("etag").unwrap().contains("1.0.0:"),
+        "validators name the release"
+    );
+    assert_eq!(
+        request("HEAD", &format!("{u}/testcraft/big.js"), &[], None).status,
+        200
+    );
+    assert_eq!(get(&format!("{u}/testcraft/missing.js"), &[]).status, 404);
+    assert_eq!(
+        get(&format!("{u}/testcraft/.craft-release.json"), &[]).status,
+        404
     );
     let r = get(&format!("{u}/testcraft/1.0.0"), &[]);
     assert_eq!((r.status, r.header("location")), (301, Some("1.0.0/")));
@@ -303,6 +323,100 @@ fn uninstalled_apps_show_the_installing_page() {
     assert_eq!(r.status, 503);
     assert!(r.text().contains("being installed"));
     assert_eq!(get(&format!("{}/readyz/testcraft", s.url), &[]).status, 503);
+}
+
+#[test]
+fn the_stable_url_follows_the_active_release() {
+    let gh = FakeGitHub::start();
+    let e = env_with(&gh, "keep_latest = 2", "min_free_space = 0", "");
+    let app = e.cfg.app("testcraft").unwrap();
+    let u = Updater::new(&e.cfg);
+    u.prepare().unwrap();
+    gh.publish(
+        REPO,
+        "v1.0.0",
+        release_zip(
+            &e.root(),
+            "1.0.0",
+            &[
+                ("chunk-0a1b.js", b"old chunk"),
+                ("old-sw.js", b"self.old = 1"),
+                ("old/sw.js", b"self.old = 2"),
+                ("legacy.html", b"<html>old page</html>"),
+                ("old.webmanifest", b"{}"),
+            ],
+        ),
+        PublishOpts::default(),
+    );
+    u.update_app(app, true);
+    let s = start(&e);
+    let url = |p: &str| format!("{}/testcraft/{p}", s.url);
+
+    // Same name, size and modification time in both releases, different bytes.
+    let v1 = get(&url("version.txt"), &[]);
+    assert_eq!((v1.status, v1.text()), (200, "1.0.0".to_string()));
+    let (etag, modified) = (
+        v1.header("etag").unwrap().to_string(),
+        v1.header("last-modified").unwrap().to_string(),
+    );
+    assert_eq!(
+        get(&url("version.txt"), &[("If-None-Match", &etag)]).status,
+        304
+    );
+
+    gh.publish(
+        REPO,
+        "v1.1.0",
+        release_zip(&e.root(), "1.1.0", &[]),
+        PublishOpts::default(),
+    );
+    u.update_app(app, true);
+    for (name, value) in [
+        ("If-None-Match", etag.as_str()),
+        ("If-Modified-Since", modified.as_str()),
+    ] {
+        let r = get(&url("version.txt"), &[(name, value)]);
+        assert_eq!(
+            (r.status, r.text()),
+            (200, "1.1.0".to_string()),
+            "{name} from 1.0.0"
+        );
+    }
+    let v2 = get(&url("version.txt"), &[]);
+    assert_eq!(
+        get(
+            &url("version.txt"),
+            &[("If-None-Match", v2.header("etag").unwrap())]
+        )
+        .status,
+        304
+    );
+    // A tab loaded before the update can still fetch a file only its release has.
+    let old = get(&url("chunk-0a1b.js"), &[]);
+    assert_eq!((old.status, old.text()), (200, "old chunk".to_string()));
+    assert!(old.header("etag").unwrap().contains("1.0.0:"));
+    // Pages, service workers and manifests are never taken from an older release.
+    for gone in ["old/sw.js", "legacy.html", "old.webmanifest", "old/"] {
+        assert_eq!(get(&url(gone), &[]).status, 404, "{gone}");
+    }
+    // Retained releases stay reachable at their versioned URL, cached as immutable.
+    let pinned = get(&url("1.0.0/version.txt"), &[]);
+    assert_eq!(
+        (pinned.text(), pinned.header("cache-control")),
+        (
+            "1.0.0".to_string(),
+            Some("public, max-age=31536000, immutable")
+        )
+    );
+    let st: serde_json::Value =
+        serde_json::from_slice(&get(&format!("{}/status.json", s.url), &[]).body).unwrap();
+    assert_eq!(
+        (
+            st["apps"][0]["url"].as_str(),
+            st["apps"][0]["active"].as_str()
+        ),
+        (Some("testcraft/"), Some("1.1.0"))
+    );
 }
 
 fn csrf_from(r: &Resp) -> String {
@@ -470,7 +584,7 @@ fn basic_auth_protects_admin_by_role_and_leaves_public_apps_open() {
         401
     );
     // [auth] apps defaults to public.
-    assert_eq!(get(&format!("{u}/testcraft/"), &[]).status, 302);
+    assert_eq!(get(&format!("{u}/testcraft/"), &[]).status, 200);
     assert_eq!(get(&format!("{u}/status.json"), &[]).status, 200);
 }
 
@@ -633,7 +747,7 @@ fn signed_in_apps_need_a_role_and_admin_needs_the_admin_role() {
 
     let user = session_from(&form_login(u, "bo", "bo-password", "testcraft%2F"));
     let as_user = [("Cookie", user.as_str())];
-    assert_eq!(get(&format!("{u}/testcraft/"), &as_user).status, 302);
+    assert_eq!(get(&format!("{u}/testcraft/"), &as_user).status, 200);
     assert_eq!(
         get(&format!("{u}/testcraft/1.0.0/big.js"), &as_user).status,
         200
@@ -655,7 +769,7 @@ fn signed_in_apps_need_a_role_and_admin_needs_the_admin_role() {
 
     let admin = session_from(&form_login(u, "ana", "s3cret-pw", ""));
     let as_admin = [("Cookie", admin.as_str())];
-    assert_eq!(get(&format!("{u}/testcraft/"), &as_admin).status, 302);
+    assert_eq!(get(&format!("{u}/testcraft/"), &as_admin).status, 200);
     assert_eq!(get(&format!("{u}/admin/"), &as_admin).status, 200);
     let me: serde_json::Value =
         serde_json::from_slice(&get(&format!("{u}/auth/me"), &as_admin).body).unwrap();
@@ -697,7 +811,7 @@ fn proxy_identities_only_from_trusted_peers_with_a_role() {
     assert_eq!(get(&format!("{u}/admin/"), &member).status, 200);
     let user = [("Remote-User", "bob"), ("Remote-Groups", "craft-users")];
     assert_eq!(get(&format!("{u}/admin/"), &user).status, 403);
-    assert_eq!(get(&format!("{u}/testcraft/"), &user).status, 302);
+    assert_eq!(get(&format!("{u}/testcraft/"), &user).status, 200);
     let outsider = [("Remote-User", "cy"), ("Remote-Groups", "staff")];
     assert_eq!(get(&format!("{u}/testcraft/"), &outsider).status, 403);
 
@@ -801,7 +915,7 @@ fn admin_host_separates_the_admin_origin_from_the_apps() {
             .any(|(k, v)| k == "set-cookie" && v.to_ascii_lowercase().contains("domain=")),
         "cookies are host-only"
     );
-    assert_eq!(get(&format!("{u}/testcraft/"), &[]).status, 302);
+    assert_eq!(get(&format!("{u}/testcraft/"), &[]).status, 200);
     for host in ["admin.example.net", "apps.example.net"] {
         assert_eq!(get(&format!("{u}/healthz"), &[("Host", host)]).status, 200);
         assert_eq!(
@@ -843,7 +957,7 @@ fn admin_host_separates_the_admin_origin_from_the_apps() {
     );
     assert_eq!(
         get(&format!("{}/testcraft/", s.url), &fwd_admin).status,
-        302
+        200
     );
 }
 
@@ -947,7 +1061,7 @@ fn oidc_login_validates_state_nonce_and_maps_groups_to_roles() {
     let user = session_from(&user);
     assert_eq!(
         get(&format!("{u}/testcraft/"), &[("Cookie", &user)]).status,
-        302
+        200
     );
     assert_eq!(
         get(&format!("{u}/admin/api/status"), &[("Cookie", &user)]).status,

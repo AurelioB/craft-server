@@ -39,6 +39,12 @@ pub fn cycle(cfg: &Config, updater: &Updater, manual: bool) -> Vec<(String, Outc
         }
         results.push((app.id.clone(), outcome));
     }
+    // Also outside updates: a replaced release that open tabs used goes once they stop.
+    for app in cfg.enabled_apps() {
+        if let Err(e) = updater.apply_retention(app) {
+            log::warn!("{}: retention failed: {e:#}", app.id);
+        }
+    }
     if let Err(e) = updater.prune_cache() {
         log::warn!("cache pruning failed: {e:#}");
     }
@@ -114,6 +120,15 @@ fn updater_loop(cfg: Arc<Config>, activity: Arc<Activity>, phase: Arc<Mutex<Stri
         Ok(_lock) => {
             if let Err(e) = crate::layout::backfill_precompressed(&cfg) {
                 log::warn!("precompress backfill: {e:#}");
+            }
+            // Apply the retention settings at once. With a grace period, wait for the first
+            // scheduled check instead: which releases open tabs use is unknown after a restart.
+            if cfg.retention.keep_recently_used_secs == 0 {
+                for app in cfg.enabled_apps() {
+                    if let Err(e) = updater.apply_retention(app) {
+                        log::warn!("{}: retention failed: {e:#}", app.id);
+                    }
+                }
             }
         }
         Err(e) => log::warn!("{e:#}"),

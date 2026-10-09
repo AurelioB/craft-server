@@ -160,10 +160,12 @@ pub struct Retention {
 
 impl Default for Retention {
     fn default() -> Self {
+        // One release per app: the active one. `keep_latest`, `keep_days` and
+        // `keep_recently_used` (a grace period for tabs opened before an update) keep more.
         Self {
-            keep_latest: 3,
-            keep_days: 30,
-            keep_recently_used_secs: 24 * 3600,
+            keep_latest: 1,
+            keep_days: 0,
+            keep_recently_used_secs: 0,
             cache_max_bytes: 2 << 30,
         }
     }

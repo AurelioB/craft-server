@@ -21,8 +21,9 @@ flowchart LR
   B[browsers] --> P
 ```
 
-- `/` lists the apps with their versions; `/photocraft/` redirects to the active immutable
-  release (`/photocraft/0.5.0/`), so open tabs keep loading matching files after an update.
+- `/` lists the apps with their versions; `/photocraft/` serves the active release directly,
+  with no version in the URL. Retained older releases stay reachable at `/photocraft/<version>/`.
+  By default only the active release is kept (`[retention] keep_latest`).
 - Updates are downloaded, checksum-verified, extracted safely, tested over HTTP and published
   atomically in the background. Per app, a new release goes live **immediately** or once the
   app has had **no requests for a while** (`activation = "idle"`).

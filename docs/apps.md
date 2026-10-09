@@ -19,14 +19,16 @@ Common to all seven:
   SHA-256 digest for every asset. Both matched the downloaded web archives.
 - The archive holds one top-level directory `<artifact>-web-<version>/` with `index.html`,
   wasm-bindgen glue and one WebAssembly module, plus `HOSTING.md`, `_headers` and `.htaccess`.
-- `index.html` uses relative URLs only, so every app works under a nested path such as
-  `/photocraft/0.5.0/`.
+- `index.html` uses relative URLs only, so every app works under a path prefix such as
+  `/photocraft/` (stable URL) or `/photocraft/0.5.0/` (a retained release).
 - Requirements from upstream `HOSTING.md`: `.wasm` as `application/wasm`, `.js` as
   `text/javascript`, gzip or Brotli compression, HTTPS (or localhost) for WebGPU, clipboard and
   storage. No cross-origin isolation headers are needed.
-- Some releases reuse the same asset names across versions (EffectCraft, LightCraft). Serving each
-  release from its own versioned directory makes long-lived caching safe for all apps; entry
-  pages, `sw.js` and manifests are still revalidated.
+- Some releases reuse the same asset names across versions (EffectCraft, LightCraft). At the
+  stable URL every response is revalidated, and entity tags carry the release, so a browser never
+  keeps a file from the previous release; date validators are ignored because two releases can
+  ship a file with the same size and time. Versioned URLs are cached as immutable, except entry
+  pages, `sw.js` and manifests.
 - Tag `v0.1.1-rc.5` of PhotoCraft is not flagged as a pre-release on GitHub; the updater treats
   semver pre-release suffixes as pre-releases regardless of the flag.
 

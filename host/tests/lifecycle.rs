@@ -90,8 +90,17 @@ fn installs_publishes_and_updates_atomically() {
     assert_eq!(kind(&update(&e)), installed("1.1.0"));
     assert_eq!(e.served_version().as_deref(), Some("1.1.0"));
     assert!(
-        e.release_dir("1.0.0").join("index.html").is_file(),
-        "previous release stays for open tabs"
+        !e.release_dir("1.0.0").exists(),
+        "by default only the active release is kept (no open tab used 1.0.0)"
+    );
+    assert_eq!(
+        u.store
+            .load("testcraft")
+            .unwrap()
+            .installed
+            .keys()
+            .collect::<Vec<_>>(),
+        ["1.1.0"]
     );
     assert_eq!(
         std::fs::read_dir(e.cfg.paths.staging()).unwrap().count(),
@@ -388,7 +397,8 @@ fn renamed_artifacts_and_prerelease_tags_follow_the_manifest() {
 #[test]
 fn rollback_blocks_until_allowed_or_superseded() {
     let gh = FakeGitHub::start();
-    let e = env(&gh);
+    // Rolling back needs an older release on disk: keep two.
+    let e = env_with(&gh, "keep_latest = 2", "min_free_space = 0", "");
     let app = e.cfg.app("testcraft").unwrap();
     gh.publish(
         REPO,
@@ -536,6 +546,41 @@ fn retention_keeps_active_pinned_and_recent_releases() {
 }
 
 #[test]
+fn keep_latest_counts_the_active_release_first() {
+    let gh = FakeGitHub::start();
+    let e = env(&gh); // defaults: keep one release
+    let app = e.cfg.app("testcraft").unwrap();
+    for v in ["1.0.0", "1.1.0"] {
+        gh.publish(
+            REPO,
+            &format!("v{v}"),
+            release_zip(&e.root(), v, &[]),
+            PublishOpts::default(),
+        );
+    }
+    assert_eq!(kind(&update(&e)), installed("1.1.0"));
+    std::thread::sleep(Duration::from_millis(1100)); // distinct installed_at seconds
+    let u = Updater::new(&e.cfg);
+    u.pin(app, "1.0.0").unwrap();
+    assert_eq!(e.current().as_deref(), Some("1.0.0"));
+    u.unpin(app).unwrap();
+    update(&e);
+    assert_eq!(e.current().as_deref(), Some("1.1.0"));
+    // 1.0.0 was installed last, but the active 1.1.0 is the one kept.
+    u.apply_retention(app).unwrap();
+    assert_eq!(
+        u.store
+            .load("testcraft")
+            .unwrap()
+            .installed
+            .keys()
+            .collect::<Vec<_>>(),
+        ["1.1.0"]
+    );
+    assert!(!e.release_dir("1.0.0").exists());
+}
+
+#[test]
 fn reconcile_recovers_from_interrupted_operations() {
     let gh = FakeGitHub::start();
     let e = env(&gh);
@@ -675,7 +720,7 @@ fn idle_activation_waits_for_quiet_apps_and_survives_restarts() {
     let gh = FakeGitHub::start();
     let e = env_with(
         &gh,
-        "activation = \"idle\"\nidle_after = 2",
+        "activation = \"idle\"\nidle_after = 2\nkeep_latest = 5",
         "min_free_space = 0",
         "",
     );
@@ -776,7 +821,7 @@ fn retention_keeps_releases_that_open_tabs_recently_used() {
         &gh,
         "keep_latest = 1\nkeep_days = 0",
         "min_free_space = 0",
-        "",
+        "[retention]\nkeep_recently_used = \"1h\"\n",
     );
     let app = e.cfg.app("testcraft").unwrap();
     let activity = Arc::new(Activity::new());

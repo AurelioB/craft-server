@@ -71,7 +71,12 @@ sequenceDiagram
     `ServeDir`) instead of nginx configuration.
 - **Activation policy.** The plan asked to apply updates "when the app is not being used". The
   server only observes requests, so `idle` activation is a request-inactivity heuristic;
-  versioned URLs make immediate activation safe for open tabs, which is why it is the default.
+  immediate activation is the default.
+- **Stable app URLs, one release by default.** `/<app>/` serves the active release directly, as
+  requested, instead of redirecting to `/<app>/<version>/`. That gives up the guarantee that an
+  open tab keeps loading files of its own release; the server narrows the gap by revalidating
+  every response with release-scoped entity tags and by serving files missing from the active
+  release from retained ones. Retention keeps only the active release by default.
 - **One port, roles.** Launcher, apps, sign-in and `/admin` share one listener. `[auth]` signs
   people in for the whole site; the admin role manages updates, and `[auth] apps = "signed-in"`
   optionally limits the apps to accounts with the user or admin role. `/admin` therefore shares

@@ -1,17 +1,21 @@
 //! Static file serving for releases and staged candidates: precompressed copies, MIME types,
 //! conditional requests, cache policy and hidden-file protection.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use axum::body::Body;
-use axum::http::{HeaderValue, Request, Response, StatusCode, Uri, header};
+use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode, Uri, header};
 use tower::ServiceExt;
 use tower_http::services::ServeDir;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum CachePolicy {
     /// Versioned release URLs: content never changes.
     Immutable,
+    /// The app's stable URL, served from the active release (named here): every response
+    /// revalidates, and validators carry the release so a file from another release never
+    /// matches, even with the same size and modification time.
+    Current(String),
     /// Staged candidates.
     NoStore,
 }
@@ -42,6 +46,95 @@ pub fn path_allowed(rest: &str) -> bool {
     !decoded.contains('\\')
         && !decoded.contains('\0')
         && decoded.split('/').all(|seg| !seg.starts_with('.'))
+}
+
+/// The file or directory a request path names under `root`, if the path may be served.
+pub fn release_path(root: &Path, rest: &str) -> Option<PathBuf> {
+    let path = rest.split('?').next().unwrap_or(rest);
+    if !path_allowed(path) {
+        return None;
+    }
+    let decoded = percent_decode(path)?;
+    Some(root.join(decoded.trim_start_matches('/')))
+}
+
+/// Whether a path missing from the active release may come from an older retained one: plain
+/// assets (scripts, WebAssembly, styles, images) that a page opened before an update asks for.
+/// Never pages, directories, service workers or manifests, so an old entry point or worker
+/// cannot outlive the release that dropped it.
+pub fn fallback_allowed(rest: &str) -> bool {
+    let path = rest.split('?').next().unwrap_or(rest);
+    !revalidated(path)
+        && !path.ends_with(".html")
+        && path.rsplit('/').next().is_some_and(|f| f.contains('.'))
+}
+
+/// Keep only entity tags issued for `release`, without the release prefix, so ServeDir can
+/// compare them; tags from other releases never match. Date validators are dropped: equal
+/// modification times in two releases do not mean equal files.
+fn scope_validators(headers: &mut HeaderMap, release: &str) {
+    headers.remove(header::IF_MODIFIED_SINCE);
+    headers.remove(header::IF_UNMODIFIED_SINCE);
+    let prefix = format!("{release}:");
+    // A range continues a download only from the same release; otherwise send the whole file.
+    if let Some(if_range) = headers.remove(header::IF_RANGE) {
+        let same = if_range
+            .to_str()
+            .ok()
+            .and_then(|t| t.strip_prefix('"')?.strip_suffix('"'))
+            .and_then(|inner| inner.strip_prefix(&prefix))
+            .and_then(|orig| HeaderValue::from_str(&format!("\"{orig}\"")).ok());
+        match same {
+            Some(v) => {
+                headers.insert(header::IF_RANGE, v);
+            }
+            None => {
+                headers.remove(header::RANGE);
+            }
+        }
+    }
+    let Some(inm) = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+    else {
+        return;
+    };
+    headers.remove(header::IF_NONE_MATCH);
+    let kept: Vec<String> = inm
+        .split(',')
+        .map(str::trim)
+        .filter_map(|tag| {
+            let (weak, quoted) = match tag.strip_prefix("W/") {
+                Some(rest) => ("W/", rest),
+                None => ("", tag),
+            };
+            let inner = quoted.strip_prefix('"')?.strip_suffix('"')?;
+            inner
+                .strip_prefix(prefix.as_str())
+                .map(|orig| format!("{weak}\"{orig}\""))
+        })
+        .collect();
+    if let Ok(v) = HeaderValue::from_str(&kept.join(", "))
+        && !kept.is_empty()
+    {
+        headers.insert(header::IF_NONE_MATCH, v);
+    }
+}
+
+/// Prefix the response's entity tag with the release.
+fn scope_etag(headers: &mut HeaderMap, release: &str) {
+    let Some(tag) = headers.get(header::ETAG).and_then(|v| v.to_str().ok()) else {
+        return;
+    };
+    let (weak, quoted) = match tag.strip_prefix("W/") {
+        Some(rest) => ("W/", rest),
+        None => ("", tag),
+    };
+    let inner = quoted.trim_matches('"');
+    if let Ok(v) = HeaderValue::from_str(&format!("{weak}\"{release}:{inner}\"")) {
+        headers.insert(header::ETAG, v);
+    }
 }
 
 /// Entry pages, service workers and manifests revalidate even under versioned URLs, so a
@@ -103,6 +196,9 @@ pub async fn serve_dir(
         return simple(StatusCode::NOT_FOUND, "not found\n");
     }
     let (mut parts, body) = req.into_parts();
+    if let CachePolicy::Current(release) = &policy {
+        scope_validators(&mut parts.headers, release);
+    }
     parts.uri = match Uri::builder().path_and_query(rest).build() {
         Ok(u) => u,
         Err(_) => return simple(StatusCode::BAD_REQUEST, "bad request\n"),
@@ -122,8 +218,11 @@ pub async fn serve_dir(
         let last = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
         return redirect(status, &format!("{last}/"));
     }
+    if let CachePolicy::Current(release) = &policy {
+        scope_etag(res.headers_mut(), release);
+    }
     let cache = match (
-        policy,
+        &policy,
         status.is_success() || status == StatusCode::NOT_MODIFIED,
     ) {
         (CachePolicy::NoStore, _) => "no-store",
@@ -141,6 +240,57 @@ pub async fn serve_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validators_are_scoped_to_the_release() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::IF_NONE_MATCH,
+            HeaderValue::from_static("\"1.0.0:abc\", W/\"0.9.0:abc\", \"x\""),
+        );
+        h.insert(
+            header::IF_MODIFIED_SINCE,
+            HeaderValue::from_static("Thu, 01 Jan 1981 00:00:00 GMT"),
+        );
+        scope_validators(&mut h, "1.0.0");
+        assert_eq!(h.get(header::IF_NONE_MATCH).unwrap(), "\"abc\"");
+        assert!(h.get(header::IF_MODIFIED_SINCE).is_none());
+        let mut other = HeaderMap::new();
+        other.insert(
+            header::IF_NONE_MATCH,
+            HeaderValue::from_static("\"1.0.0:abc\""),
+        );
+        scope_validators(&mut other, "1.1.0");
+        assert!(
+            other.get(header::IF_NONE_MATCH).is_none(),
+            "another release's tag never matches"
+        );
+        // A range continues only within the same release; otherwise the whole file is sent.
+        let ranged = |if_range: &'static str, release: &str| {
+            let mut h = HeaderMap::new();
+            h.insert(header::RANGE, HeaderValue::from_static("bytes=10-"));
+            h.insert(header::IF_RANGE, HeaderValue::from_static(if_range));
+            scope_validators(&mut h, release);
+            (
+                h.get(header::RANGE).is_some(),
+                h.get(header::IF_RANGE)
+                    .map(|v| v.to_str().unwrap().to_string()),
+            )
+        };
+        assert_eq!(
+            ranged("\"1.0.0:abc\"", "1.0.0"),
+            (true, Some("\"abc\"".into()))
+        );
+        assert_eq!(ranged("\"1.0.0:abc\"", "1.1.0"), (false, None));
+        assert_eq!(
+            ranged("Thu, 01 Jan 1981 00:00:00 GMT", "1.1.0"),
+            (false, None)
+        );
+        let mut res = HeaderMap::new();
+        res.insert(header::ETAG, HeaderValue::from_static("W/\"abc\""));
+        scope_etag(&mut res, "1.0.0");
+        assert_eq!(res.get(header::ETAG).unwrap(), "W/\"1.0.0:abc\"");
+    }
 
     #[test]
     fn hidden_and_encoded_traversal_paths_are_refused() {
