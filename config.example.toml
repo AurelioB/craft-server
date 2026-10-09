@@ -5,7 +5,7 @@
 [server]
 listen = "0.0.0.0:8080"
 # Reverse proxies whose X-Forwarded-Proto/-Host and identity headers are believed (CIDR or
-# address). Needed for [auth] method = "proxy" and for Secure cookies behind HTTPS.
+# address). Needed for [auth] methods = ["proxy"] and for Secure cookies behind HTTPS.
 trusted_proxies = []           # e.g. ["172.16.0.0/12"]
 
 [updater]
@@ -48,30 +48,32 @@ keep_recently_used = "24h"     # plus releases that served requests this recentl
 cache_max_size = "2GiB"        # downloaded archives (least recently used are removed)
 
 [auth]
-# How people sign in, for /admin and (optionally) the apps:
-#   none   nobody signs in; with [admin] enabled, everyone who reaches /admin is an admin
-#          (only behind a proxy that protects /admin)
-#   basic  HTTP Basic against users_file
-#   form   login page and session cookie against users_file
-#   oidc   OpenID Connect login (see [auth.oidc])
-#   proxy  user from a header set by a trusted proxy (forward auth, see [auth.proxy])
-method = "none"
+# How people sign in, for /admin and (optionally) the apps. A list of:
+#   local  sign-in page with user name and password (accounts in the user database)
+#   oidc   OpenID Connect sign-in (see [auth.oidc]); combines with local
+#   basic  HTTP Basic against the user database (alone)
+#   proxy  user from a header set by a trusted proxy (forward auth, see [auth.proxy]; alone)
+# Empty: nobody signs in; with [admin] enabled, everyone who reaches /admin is an admin (only
+# behind a proxy that protects /admin).
+# Accounts (user name, e-mail, password, role, linked OIDC identity) live in
+# STATE_DIR/users.sqlite3; manage them in /admin or with `craft-host user …`.
+methods = []                   # e.g. ["local"], ["oidc"], ["local", "oidc"]
 # Who may open the launcher and the apps: "public" (anyone who reaches the server) or
-# "signed-in" (accounts with the user or admin role; needs a method other than none).
+# "signed-in" (accounts with the user or admin role; needs a sign-in method).
 apps = "public"
-# basic and form: lines "name:<hash>:admin" or "name:<hash>:user" (role defaults to user),
-# relative to CONFIG_DIR; create hashes with `craft-host hash-password`.
-users_file = "users"
 session_ttl = "12h"
 cookie_secure = "auto"         # auto (Secure when the client used HTTPS) | always | never
-# oidc and proxy: roles from the account's groups (OIDC groups claim / proxy groups header).
-# Admins: these accounts or members of these groups; required while [admin] is enabled.
+# Roles from the provider's groups (OIDC groups claim / proxy groups header).
+# proxy: required, admins are these accounts or members of these groups.
+# oidc: optional; when any list is set, the provider decides roles at every sign-in,
+# otherwise roles are managed in /admin and new OIDC accounts get the user role.
 admin_users = []
 admin_groups = []              # e.g. ["craft-admins"]
 # Users: members of these groups; empty = every account the provider signs in.
 user_groups = []               # e.g. ["craft-users"]
 
 # [auth.oidc]
+# name = "Authentik"                          # sign-in button: "Sign in with Authentik"
 # issuer = "https://auth.example.net/application/o/craft-apps"
 # client_id = "craft-apps"
 # client_secret_file = "oidc-client-secret"   # relative to CONFIG_DIR; omit for a public client
@@ -79,6 +81,9 @@ user_groups = []               # e.g. ["craft-users"]
 # scopes = ["openid", "profile", "email"]
 # username_claim = "preferred_username"
 # groups_claim = "groups"
+# create_users = true          # first sign-in of an unknown identity creates an account
+# link_by_email = false        # true: link an unknown identity to the account with the same
+#                              # e-mail address if the provider marks it verified
 
 # [auth.proxy]
 # user_header = "Remote-User"       # Authentik: "X-authentik-username"

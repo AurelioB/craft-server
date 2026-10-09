@@ -788,33 +788,84 @@ fn parse_apps_table(
     out
 }
 
-/// Sign-in settings moved from `[admin]` to `[auth]`; name them in the error so an older
-/// config.toml is easy to update (it is rejected either way, never read as "no sign-in").
+/// Settings from earlier versions; name them in the error so an older config.toml is easy to
+/// update (it is rejected either way, never read as "no sign-in").
 fn moved_admin_keys(text: &str) -> Vec<String> {
     let Ok(table) = toml::from_str::<toml::Table>(text) else {
         return vec![];
     };
-    let Some(admin) = table.get("admin").and_then(|a| a.as_table()) else {
-        return vec![];
+    let keys = |section: &str| -> Vec<String> {
+        table
+            .get(section)
+            .and_then(|a| a.as_table())
+            .map(|t| t.keys().cloned().collect())
+            .unwrap_or_default()
     };
     let mut hints = Vec::new();
-    for key in admin.keys() {
-        let hint = match key.as_str() {
-            "auth" => {
-                "[admin] auth: replaced by [auth] method (\"disabled\" becomes [admin] enabled = false)"
-            }
-            "users_file" | "session_ttl" | "cookie_secure" | "oidc" | "proxy" => {
-                "[admin] users_file, session_ttl, cookie_secure, oidc and proxy: moved to [auth] (and [auth.oidc], [auth.proxy]); OIDC redirect_url now ends in /auth/oidc/callback"
-            }
-            "allowed_users" | "allowed_groups" => {
-                "[admin] allowed_users/allowed_groups: replaced by [auth] admin_users/admin_groups"
-            }
-            "listen" | "shared_origin" => {
-                "[admin] listen/shared_origin: removed; /admin is served on the apps' port (optionally only for [admin] host)"
-            }
-            _ => continue,
-        };
-        if !hints.iter().any(|h: &String| h == hint) {
+    let moved = [
+        (
+            "admin",
+            "auth",
+            "[admin] auth: replaced by [auth] methods (\"form\" becomes [\"local\"]) plus [admin] enabled = true",
+        ),
+        (
+            "admin",
+            "users_file",
+            "[admin] users_file, session_ttl, cookie_secure, oidc and proxy: moved to [auth] (and [auth.oidc], [auth.proxy]); OIDC redirect_url now ends in /auth/oidc/callback",
+        ),
+        (
+            "admin",
+            "session_ttl",
+            "[admin] users_file, session_ttl, cookie_secure, oidc and proxy: moved to [auth] (and [auth.oidc], [auth.proxy]); OIDC redirect_url now ends in /auth/oidc/callback",
+        ),
+        (
+            "admin",
+            "cookie_secure",
+            "[admin] users_file, session_ttl, cookie_secure, oidc and proxy: moved to [auth] (and [auth.oidc], [auth.proxy]); OIDC redirect_url now ends in /auth/oidc/callback",
+        ),
+        (
+            "admin",
+            "oidc",
+            "[admin] users_file, session_ttl, cookie_secure, oidc and proxy: moved to [auth] (and [auth.oidc], [auth.proxy]); OIDC redirect_url now ends in /auth/oidc/callback",
+        ),
+        (
+            "admin",
+            "proxy",
+            "[admin] users_file, session_ttl, cookie_secure, oidc and proxy: moved to [auth] (and [auth.oidc], [auth.proxy]); OIDC redirect_url now ends in /auth/oidc/callback",
+        ),
+        (
+            "admin",
+            "allowed_users",
+            "[admin] allowed_users/allowed_groups: replaced by [auth] admin_users/admin_groups",
+        ),
+        (
+            "admin",
+            "allowed_groups",
+            "[admin] allowed_users/allowed_groups: replaced by [auth] admin_users/admin_groups",
+        ),
+        (
+            "admin",
+            "listen",
+            "[admin] listen/shared_origin: removed; /admin is served on the apps' port (optionally only for [admin] host)",
+        ),
+        (
+            "admin",
+            "shared_origin",
+            "[admin] listen/shared_origin: removed; /admin is served on the apps' port (optionally only for [admin] host)",
+        ),
+        (
+            "auth",
+            "method",
+            "[auth] method: replaced by [auth] methods, a list: \"form\" becomes [\"local\"], \"oidc\" [\"oidc\"], \"basic\" [\"basic\"], \"proxy\" [\"proxy\"], \"none\" []",
+        ),
+        (
+            "auth",
+            "users_file",
+            "[auth] users_file: removed; accounts live in STATE_DIR/users.sqlite3. Import the file with `craft-host user import FILE`, or add accounts with `craft-host user add`",
+        ),
+    ];
+    for (section, key, hint) in moved {
+        if keys(section).iter().any(|k| k == key) && !hints.iter().any(|h: &String| h == hint) {
             hints.push(hint.to_string());
         }
     }
@@ -1161,9 +1212,9 @@ entry = "effectcraft"
 
     #[test]
     fn activation_auth_and_admin_settings_are_validated() {
-        use crate::access::{AppsAccess, AuthMethod};
+        use crate::access::{AppsAccess, SignIn};
         let cfg = load(
-            "[updater]\nactivation = \"idle\"\nidle_after = \"10m\"\n[apps.photocraft]\nactivation = \"immediate\"\n[auth]\nmethod = \"form\"\napps = \"signed-in\"\n[admin]\nenabled = true\nhost = \"Admin.Example.net\"\n",
+            "[updater]\nactivation = \"idle\"\nidle_after = \"10m\"\n[apps.photocraft]\nactivation = \"immediate\"\n[auth]\nmethods = [\"local\"]\napps = \"signed-in\"\n[admin]\nenabled = true\nhost = \"Admin.Example.net\"\n",
         )
         .unwrap();
         assert_eq!(cfg.app("vectorcraft").unwrap().activation, Activation::Idle);
@@ -1174,22 +1225,45 @@ entry = "effectcraft"
         );
         assert_eq!(cfg.admin.host.as_deref(), Some("admin.example.net"));
         assert_eq!(
-            (cfg.auth.method, cfg.auth.apps),
-            (AuthMethod::Form, AppsAccess::SignedIn)
+            (cfg.auth.sign_in, cfg.auth.apps),
+            (
+                SignIn::Interactive {
+                    local: true,
+                    oidc: false
+                },
+                AppsAccess::SignedIn
+            )
         );
-        // Same port, no host: the default.
-        assert!(load("[auth]\nmethod = \"basic\"\n[admin]\nenabled = true\n").is_ok());
-        // A half-migrated file with the old sign-in keys is rejected, never read as method none.
-        let all = load("[admin]\nenabled = true\nauth = \"form\"\nallowed_groups = [\"a\"]\n")
+        // Same port, no host: the default. Local and OIDC combine.
+        assert!(load("[auth]\nmethods = [\"basic\"]\n[admin]\nenabled = true\n").is_ok());
+        let both = load("[auth]\nmethods = [\"local\", \"oidc\"]\n[auth.oidc]\nissuer = \"https://id.example.net\"\nclient_id = \"c\"\nredirect_url = \"https://apps.example.net/auth/oidc/callback\"\n").unwrap();
+        assert_eq!(
+            both.auth.sign_in,
+            SignIn::Interactive {
+                local: true,
+                oidc: true
+            }
+        );
+        let o = both.auth.oidc.unwrap();
+        assert!(o.create_users && !o.link_by_email, "safe defaults");
+        let all = load("[auth]\nmethods = [\"local\", \"basic\"]\n")
+            .unwrap_err()
+            .0
+            .join("\n");
+        assert!(all.contains("must stand alone"), "{all}");
+        // Older files are rejected with a hint per moved key, never read as "no sign-in".
+        let all = load("[admin]\nenabled = true\nauth = \"form\"\nallowed_groups = [\"a\"]\n[auth]\nmethod = \"form\"\nusers_file = \"users\"\n")
             .unwrap_err()
             .0
             .join("\n");
         assert!(
-            all.contains("replaced by [auth] method") && all.contains("admin_users/admin_groups"),
+            all.contains("replaced by [auth] methods")
+                && all.contains("admin_users/admin_groups")
+                && all.contains("craft-host user import"),
             "{all}"
         );
 
-        let all = load("[auth]\nmethod = \"proxy\"\n[admin]\nenabled = true\n")
+        let all = load("[auth]\nmethods = [\"proxy\"]\n[admin]\nenabled = true\n")
             .unwrap_err()
             .0
             .join("\n");
@@ -1203,20 +1277,20 @@ entry = "effectcraft"
             .0
             .join("\n");
         assert!(all.contains("needs a sign-in method"), "{all}");
-        let all = load("[auth]\nmethod = \"oidc\"\n[admin]\nhost = \"admin.example.net\"\n")
+        let all = load("[auth]\nmethods = [\"oidc\"]\n[admin]\nhost = \"admin.example.net\"\n")
             .unwrap_err()
             .0
             .join("\n");
         assert!(all.contains("needs an [auth.oidc] section"), "{all}");
         assert!(all.contains("cannot be combined"), "{all}");
-        let all = load("[auth]\nmethod = \"oidc\"\n[auth.oidc]\nissuer = \"https://id.example.net\"\nredirect_url = \"https://x/admin/oidc/callback\"\n").unwrap_err().0.join("\n");
+        let all = load("[auth]\nmethods = [\"oidc\"]\n[auth.oidc]\nissuer = \"https://id.example.net\"\nredirect_url = \"https://x/admin/oidc/callback\"\n").unwrap_err().0.join("\n");
         assert!(
             all.contains("client_id: required") && all.contains("/auth/oidc/callback"),
             "{all}"
         );
-        let all = load("[auth]\nmethod = \"magic\"\napps = \"some\"\n[server]\nlisten = \"nowhere\"\ntrusted_proxies = [\"10.0.0.0/99\"]\n").unwrap_err().0.join("\n");
+        let all = load("[auth]\nmethods = [\"magic\"]\napps = \"some\"\n[server]\nlisten = \"nowhere\"\ntrusted_proxies = [\"10.0.0.0/99\"]\n").unwrap_err().0.join("\n");
         assert!(
-            all.contains("[auth] method")
+            all.contains("[auth] methods")
                 && all.contains("[auth] apps")
                 && all.contains("[server] listen")
                 && all.contains("trusted_proxies"),

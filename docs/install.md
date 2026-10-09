@@ -19,9 +19,9 @@ Edit `.env` (copy `.env.example`). Host paths are bind-mount sources; container 
 
 | Setting | Container path | Access | Holds |
 | --- | --- | --- | --- |
-| `CONFIG_DIR` | `/config` | read-only | `config.toml`, users file, GitHub token, OIDC client secret |
+| `CONFIG_DIR` | `/config` | read-only | `config.toml`, GitHub token, OIDC client secret |
 | `DATA_DIR` | `/srv/data` | read-write | releases (`releases/<app>/<version>`, `current` pointers), `.staging/` |
-| `STATE_DIR` | `/srv/state` | read-write | per-app state, history, lock, heartbeat |
+| `STATE_DIR` | `/srv/state` | read-write | per-app state, history, lock, heartbeat, accounts (`users.sqlite3`) |
 | `CACHE_DIR` | `/srv/cache` | read-write | verified release archives, API response cache |
 | `WORK_DIR` | `/srv/work` | read-write | in-progress downloads |
 | `LOG_DIR` (optional) | `/srv/logs` | read-write | rotated `updater.log` |
@@ -86,7 +86,7 @@ trust:
 
 - Redirects are relative, so the site works under any host name and behind a path prefix.
 - List the proxy in `[server] trusted_proxies` so `X-Forwarded-Proto/-Host` are honoured (secure
-  cookies, admin host matching) and, with `[auth] method = "proxy"`, its identity headers.
+  cookies, admin host matching) and, with `[auth] methods = ["proxy"]`, its identity headers.
 - `/admin` is on the apps' port; optionally give it a host name of its own (`[admin] host`), see
   [admin.md](admin.md#same-origin-as-the-apps).
 - Browser storage is per origin: a LAN name and a public name for the same server have separate
@@ -106,9 +106,10 @@ docker compose up -d
 Installed releases, state and cache are kept. Releases installed by earlier versions get their
 precompressed copies added in the background after the upgrade.
 
-Configurations that kept sign-in settings in `[admin]` (`auth`, `users_file`, `[admin.oidc]`, …)
+Configurations with older sign-in settings (`[auth] method`, `users_file`, or `[admin] auth`, …)
 are rejected with a message per moved key; see
-[admin.md](admin.md#upgrading-from-admin-auth).
+[admin.md](admin.md#upgrading-from-earlier-sign-in-settings). A users file is imported once with
+`craft-host user import`.
 
 ### From the two-service layout (web + updater)
 

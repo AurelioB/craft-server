@@ -21,17 +21,24 @@ Actions run one at a time in the background, under the same lock as scheduled up
 CLI; the page shows the running action, recent results and the update history. Every action is
 recorded with the signed-in user.
 
-The interface is **disabled by default** (`/admin` answers 404). Enable it with:
+The interface is **disabled by default** (`/admin` answers 404). Enable it with a sign-in
+method and a first administrator:
 
 ```toml
 [auth]
-method = "form"          # how people sign in, see below
+methods = ["local"]      # how people sign in, see below
 
 [admin]
 enabled = true
 ```
 
-Only accounts with the **admin** role may open it; others get 403.
+```sh
+docker compose exec -T host craft-host user add alice --role admin --email alice@example.net \
+  <<<'a long passphrase'
+```
+
+Only accounts with the **admin** role may open it; others get 403. Besides the apps it manages
+the [accounts](#accounts).
 
 > **Trust note.** On the apps' host name, `/admin` shares the apps' browser origin. If a
 > downloaded app release were malicious, its script could use a signed-in administrator's
@@ -53,77 +60,115 @@ role:
 apps = "signed-in"
 ```
 
-A page load without a session (form, OIDC) goes to the sign-in page and returns to the requested
-page afterwards; other requests (scripts, images, `status.json`) get 401, Basic asks the browser
-for credentials, and proxy mode answers 403 without an identity. `/healthz`, `/readyz/…`,
-`/auth/…`, the launcher's logos and fonts, and apps' `*.webmanifest` files stay reachable.
+A page load without a session (local, OIDC) goes to the sign-in page and returns to the
+requested page afterwards; other requests (scripts, images, `status.json`) get 401, Basic asks
+the browser for credentials, and proxy mode answers 403 without an identity. `/healthz`,
+`/readyz/…`, `/auth/…`, the launcher's logos and fonts, and apps' `*.webmanifest` files stay
+reachable.
 Browsers fetch manifests without cookies; they describe the app (EffectCraft 0.6.0: name, short
 name, description, categories, icons, colors, start URL, scope), so anyone who can reach the
 server can read those. When signed in, the launcher shows the account, its role, a link to
-`/admin` for admins and a sign-out button.
+`/admin` for admins, **Link** *provider* for accounts without a linked OIDC identity, and a
+sign-out button.
 
 Signing in controls what the server sends, not what a browser already has: after sign-out or
 session expiry, tabs that are already open keep running, and files the browser cached (release
 files are cached as immutable) or that an app's service worker stored can still be used on that
 device. New requests to the server need a fresh sign-in.
 
+## Accounts
+
+Accounts live in SQLite at `STATE_DIR/users.sqlite3` (mode 0660, readable by the service's user
+and group only; back it up with `STATE_DIR`). Each has a user name, an optional e-mail address,
+an optional password (Argon2id), a role and an optional linked OpenID Connect identity (issuer
+and subject).
+
+In `/admin` → **Users** administrators add accounts, change e-mail, role and password, remove a
+linked identity, and delete accounts. On the command line (works while the server runs):
+
+| Command | Effect |
+| --- | --- |
+| `craft-host user list` | Accounts with role, e-mail, sign-in ways and last sign-in |
+| `craft-host user add NAME [--email E] [--role user\|admin] [--no-password]` | Add; password from standard input |
+| `craft-host user set-password NAME` | New password from standard input |
+| `craft-host user set-role NAME ROLE` / `set-email NAME [E]` | Change role / e-mail (none: remove) |
+| `craft-host user unlink NAME` / `delete NAME` | Remove the linked identity / the account |
+| `craft-host user import FILE` | Add `name:<argon2 hash>[:role]` lines, e.g. an earlier users file |
+
+Run them with `docker compose exec -T host craft-host user …` (`-T` passes standard input).
+
+- Passwords need at least 8 characters. Failed sign-ins are logged and delayed; after 10
+  failures within 15 minutes an address is refused for a while.
+- Changes apply at once to existing sessions, also when made from the CLI: a new role is used on
+  the next request; a new password, a removed identity or a deleted account ends that account's
+  sessions.
+- The last administrator cannot be demoted or deleted, and nobody can delete their own account.
+  To recover a lost administrator password: `craft-host user set-password NAME`, or add another
+  administrator with `craft-host user add`.
+- Sessions are kept in memory: a restart signs everyone out.
+
 ## Sign-in methods
 
-Set `[auth] method` in `config.toml`:
+Set `[auth] methods` in `config.toml`:
 
-| Method | How it works | Roles from |
+| `methods` | How it works | Roles from |
 | --- | --- | --- |
-| `none` (default) | Nobody signs in; with `/admin` enabled every visitor is an administrator | — (only behind a proxy that authenticates `/admin` itself) |
-| `basic` | HTTP Basic against `users_file` (browser prompt) | users file |
-| `form` | Login page at `/auth/login`, session cookie, against `users_file` | users file |
-| `oidc` | OpenID Connect authorization-code flow with PKCE | groups claim |
-| `proxy` | User and groups from headers set by a trusted reverse proxy | groups header |
+| `[]` (default) | Nobody signs in; with `/admin` enabled every visitor is an administrator | — (only behind a proxy that authenticates `/admin` itself) |
+| `["local"]` | Sign-in page with user name and password | accounts |
+| `["oidc"]` | OpenID Connect; page loads go straight to the provider | accounts, or the provider's groups |
+| `["local", "oidc"]` | Sign-in page offering both | as above |
+| `["basic"]` | HTTP Basic against the accounts (browser prompt, scripts) | accounts |
+| `["proxy"]` | User and groups from headers set by a trusted reverse proxy; not stored as accounts | the proxy's groups |
 
-`apps = "signed-in"` needs a method other than `none`.
-
-### Users file (`basic`, `form`)
-
-```sh
-docker compose exec -T host craft-host hash-password <<<'a long passphrase'
-# append "name:<hash>:admin" or "name:<hash>:user" to CONFIG_DIR/users ([auth] users_file)
-chmod 0640 /srv/craft-apps/config/users
-```
-
-The role is the third field; a line without one gets `user`, a line with an unknown role is
-ignored and reported by `doctor`. Hashes are Argon2id. The file is re-read when it changes;
-removing a line revokes Basic access at once and blocks new form logins (existing sessions end at
-`session_ttl`, default 12 h, at sign-out, or at restart). Failed logins are logged and delayed.
+`apps = "signed-in"` needs a sign-in method.
 
 ### OpenID Connect
 
 ```toml
 [auth]
-method = "oidc"
+methods = ["local", "oidc"]         # or ["oidc"]
 apps = "signed-in"                  # optional
-admin_groups = ["craft-admins"]     # required while [admin] is enabled (or admin_users)
-user_groups = ["craft-users"]       # empty = every account the provider signs in
 
 [auth.oidc]
+name = "Authentik"                  # "Sign in with Authentik"
 issuer = "https://auth.example.net/application/o/craft-apps"
 client_id = "craft-apps"
 client_secret_file = "oidc-client-secret"   # in CONFIG_DIR; omit for a public client
 redirect_url = "https://apps.example.net/auth/oidc/callback"
 ```
 
-Roles: an account named in `admin_users` or in a group of `admin_groups` is an admin; otherwise
-it is a user if `user_groups` is empty or it is in one of those groups; otherwise sign-in is
-refused. In Authentik, for example, create the groups `craft-admins` and `craft-users` and assign
-people to them; its default `profile` scope mapping sends them in the `groups` claim.
+Which account a provider identity signs in to:
+
+1. the account linked to that identity (issuer + subject);
+2. otherwise, only with `link_by_email = true`: the account with the same e-mail address, if the
+   provider marks the address verified and the account has no linked identity yet. Off by
+   default, because it trusts the provider to verify addresses and never to reassign them;
+3. otherwise, with `create_users = true` (default), a new account named after
+   `preferred_username` (made unique, e.g. `ana-2`) with the user role; with `false`, sign-in is
+   refused.
+
+To link an existing account explicitly, its owner signs in with the password and chooses
+**Link** *provider* in the launcher (`/auth/oidc/login?link=1`); the identity is then tied to
+that account, and administrators see it in **Users**. An identity belongs to one account.
+
+Roles: by default they are managed in **Users** like any other account. To let the provider
+decide instead, set any of `admin_users`, `admin_groups` or `user_groups`: at every OIDC
+sign-in, an account named in `admin_users` or in a group of `admin_groups` becomes an admin;
+otherwise a user if `user_groups` is empty or it is in one of those groups; otherwise sign-in
+is refused. The provider can then also demote the last administrator; its groups can promote
+someone again. In Authentik, for example, create the groups `craft-admins` and `craft-users`
+and assign people to them; its default `profile` scope mapping sends them in the `groups` claim.
 
 Register `redirect_url` with the provider; it must be the address people use, because the
 session cookie is set for that host. The server reads the provider metadata from
 `<issuer>/.well-known/openid-configuration`, sends the browser to the authorization endpoint with
-`state`, `nonce` and a PKCE S256 challenge, and exchanges the code at the token endpoint (client
-secret via HTTP Basic). It checks the ID token's issuer, audience, authorized party, expiry and
-nonce. The ID token comes straight from the token endpoint over verified TLS, which OpenID
-Connect Core §3.1.3.7 accepts in place of a signature check. Groups come from the `groups` claim
-(`groups_claim`), the user name from `preferred_username` (`username_claim`, falling back to
-`sub`). Roles are fixed at sign-in; group changes apply at the next sign-in.
+`state`, `nonce` and a PKCE S256 challenge (the `state` is also bound to the browser by a
+cookie), and exchanges the code at the token endpoint (client secret via HTTP Basic). It checks
+the ID token's issuer, audience, authorized party, expiry and nonce. The ID token comes straight
+from the token endpoint over verified TLS, which OpenID Connect Core §3.1.3.7 accepts in place of
+a signature check. The subject comes from `sub`, the user name from `preferred_username`
+(`username_claim`), groups from `groups` (`groups_claim`), and `email`/`email_verified` from the
+same-named claims.
 
 ### Trusted proxy (forward auth)
 
@@ -132,8 +177,8 @@ Connect Core §3.1.3.7 accepts in place of a signature check. Groups come from t
 trusted_proxies = ["172.16.0.0/12"]   # addresses of your reverse proxy
 
 [auth]
-method = "proxy"
-admin_groups = ["craft-admins"]
+methods = ["proxy"]
+admin_groups = ["craft-admins"]       # required while [admin] is enabled
 user_groups = ["craft-users"]
 
 [auth.proxy]
@@ -141,9 +186,10 @@ user_header = "X-authentik-username"
 groups_header = "X-authentik-groups"  # '|' or ',' separated
 ```
 
-Roles follow the same rules as OIDC, per request. Identity headers are believed **only** from
-peers in `trusted_proxies`; a request from any other address gets 403 regardless of its headers.
-Make sure the proxy overwrites these headers and that the port is not reachable around it.
+Roles follow the group rules above, per request; proxy identities are not stored as accounts.
+Identity headers are believed **only** from peers in `trusted_proxies`; a request from any other
+address gets 403 regardless of its headers. Make sure the proxy overwrites these headers and that
+the port is not reachable around it.
 
 ## Same origin as the apps
 
@@ -163,8 +209,8 @@ host = "admin.apps.example.net"
 ```
 
 `/admin` then answers only on that host and the launcher, apps and status are not served there;
-on every other host name `/admin` answers 404. Sign-in (`/auth/`) works on both with `basic`,
-`form` and `proxy`, with a separate session per host name; `oidc` cannot be combined with
+on every other host name `/admin` answers 404. Sign-in (`/auth/`) works on both with `local`,
+`basic` and `proxy`, with a separate session per host name; `oidc` cannot be combined with
 `[admin] host`, because sign-in completes on the single `redirect_url` host. The name must
 resolve from the clients: `admin.localhost`, for example,
 only works in a browser on the server itself (browsers resolve `*.localhost` to their own
@@ -179,10 +225,11 @@ readable by anyone on the path; before using real credentials, put the server be
 
 ## Request protections
 
-- Every admin action is a `POST` that must carry the `craft_csrf` cookie value in an
-  `X-Craft-CSRF` header (double submit); a browser `Origin` from another host is refused. This
-  applies in every method, including `none`, Basic and proxy, where browsers attach credentials
-  automatically. Sign-in and sign-out refuse a foreign `Origin`.
+- Every admin action, including account changes, is a `POST` that must carry the `craft_csrf`
+  cookie value in an `X-Craft-CSRF` header (double submit); a browser `Origin` from another host
+  is refused. This applies in every method, including none, Basic and proxy, where browsers
+  attach credentials automatically. Sign-in and sign-out refuse a foreign `Origin`.
+- Password hashes never leave the server; the account list carries whether a password is set.
 - The session cookie `craft_session` is `HttpOnly`, `SameSite=Lax` and scoped to `/`, so links to
   an app from another site and the return from the identity provider keep the session. The CSRF
   cookie is `SameSite=Strict` and scoped to `/admin`. `cookie_secure = "auto"` marks both
@@ -191,14 +238,21 @@ readable by anyone on the path; before using real credentials, put the server be
 - After sign-in the server only redirects to a path on this site (`next` targets such as
   `//other.example` fall back to the launcher).
 - Admin and sign-in pages are sent with `X-Frame-Options: DENY` and `Cache-Control: no-store`.
-- With `method = "none"` and `/admin` enabled, a warning is logged at startup and reported by
-  `doctor`.
+- With no sign-in method and `/admin` enabled, a warning is logged at startup and reported by
+  `doctor`; `doctor` also fails when no administrator can sign in with the configured methods.
 
-## Upgrading from `[admin] auth`
+## Upgrading from earlier sign-in settings
 
-Older configurations kept sign-in settings in `[admin]`; they are rejected with a message naming
-each moved key. `[admin] auth` becomes `[auth] method` plus `[admin] enabled = true`;
-`users_file`, `session_ttl`, `cookie_secure`, `[admin.oidc]` and `[admin.proxy]` move to `[auth]`;
-`allowed_users`/`allowed_groups` become `admin_users`/`admin_groups`; `listen` and
-`shared_origin` are gone. Add `:admin` to the users-file lines of administrators, and register the
-new OIDC redirect URL ending in `/auth/oidc/callback`.
+Older configurations are rejected with a message naming each moved key:
+
+- `[auth] method = "form"` becomes `methods = ["local"]`; `"oidc"`, `"basic"`, `"proxy"` become
+  one-element lists; `"none"` becomes `[]`.
+- `[auth] users_file` is gone; import the file once, then delete the setting:
+  `docker compose exec -T host craft-host user import /config/users` (roles carry over).
+- With OIDC, `admin_groups`/`admin_users` are now optional (without them roles are managed in
+  **Users**).
+- From the first version with `[admin] auth`: `[admin] auth` becomes `[auth] methods` plus
+  `[admin] enabled = true`; `users_file`, `session_ttl`, `cookie_secure`, `[admin.oidc]` and
+  `[admin.proxy]` move to `[auth]`; `allowed_users`/`allowed_groups` become
+  `admin_users`/`admin_groups`; `listen` and `shared_origin` are gone; the OIDC redirect URL ends
+  in `/auth/oidc/callback`.

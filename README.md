@@ -28,11 +28,13 @@ flowchart LR
   app has had **no requests for a while** (`activation = "idle"`).
 - `/admin` shows versions, pending releases and failures, and runs check, update, apply, pin,
   unpin, rollback and allow. It is disabled by default and lives on the same port as the apps.
-- Sign-in for `/admin` and, optionally, the apps: HTTP Basic, login form, OpenID Connect or a
-  trusted reverse proxy's identity header, with two roles: **admin** (apps and `/admin`) and
-  **user** (apps only). With OIDC or forward auth, roles come from identity-provider groups.
+- Sign-in for `/admin` and, optionally, the apps: local accounts (user name, e-mail,
+  password), OpenID Connect, or both on one sign-in page; also HTTP Basic or a trusted reverse
+  proxy's identity header. Two roles: **admin** (apps and `/admin`) and **user** (apps only).
+  Accounts are managed in `/admin` or with `craft-host user …` and stored in a small SQLite file
+  in `STATE_DIR`; with OIDC, roles can come from the provider's groups.
 
-No Docker socket, privileged mode, GPU or database is involved.
+No Docker socket, privileged mode, GPU or database server is involved.
 
 ## Quick start
 
@@ -64,7 +66,7 @@ see [docs/admin.md](docs/admin.md).
 | `pin APP VERSION` / `unpin APP` | Hold an app on one release |
 | `rollback APP [VERSION]` / `allow APP VERSION` | Go back to a retained release / permit a blocked one |
 | `history [APP]` | Recent update history |
-| `hash-password` | Hash a password (stdin) for the users file |
+| `user list|add|set-password|set-role|set-email|unlink|delete|import` | Manage accounts (passwords on stdin); see [docs/admin.md](docs/admin.md#accounts) |
 
 ## Documentation
 

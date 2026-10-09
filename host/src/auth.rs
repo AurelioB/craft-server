@@ -1,18 +1,14 @@
-//! Sign-in building blocks: users file with roles (Basic and form login), sessions, trusted-proxy
-//! identities, cookies, CSRF protection and safe post-login redirects. OIDC lives in `oidc.rs`,
-//! the HTTP handlers in `login.rs`.
+//! Sign-in building blocks: sessions, trusted-proxy identities, cookies, CSRF protection and
+//! safe post-login redirects. Accounts live in `users.rs`, OIDC in `oidc.rs`, the HTTP handlers
+//! in `login.rs`.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::path::PathBuf;
-use std::time::SystemTime;
 
-use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use axum::http::HeaderMap;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use parking_lot::Mutex;
-use sha2::{Digest, Sha256};
 
 use crate::access::{AuthSettings, CookieSecure, Role, ServerSettings};
 use crate::fsutil::random_hex;
@@ -21,139 +17,30 @@ use crate::timeutil::now_epoch;
 pub const SESSION_COOKIE: &str = "craft_session";
 pub const CSRF_COOKIE: &str = "craft_csrf";
 pub const CSRF_HEADER: &str = "x-craft-csrf";
-/// Successful Basic credentials are remembered briefly so each request does not pay for Argon2.
-const VERIFIED_CACHE_SECS: i64 = 300;
+/// Failed sign-ins per client address within this window before further attempts are refused.
+const FAILURE_WINDOW_SECS: i64 = 15 * 60;
+const MAX_FAILURES: usize = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Principal {
+    /// Database account, for local, OIDC and Basic sign-in.
+    pub user_id: Option<i64>,
     pub user: String,
     pub method: &'static str,
     pub role: Role,
 }
 
-pub fn hash_password(password: &str) -> anyhow::Result<String> {
-    Argon2::default()
-        .hash_password(password.as_bytes())
-        .map(|h| h.to_string())
-        .map_err(|e| anyhow::anyhow!("cannot hash password: {e}"))
-}
-
-#[derive(Debug, Clone)]
-struct UserEntry {
-    name: String,
-    hash: String,
-    role: Role,
-}
-
-/// Users file contents as of a modification time.
-type LoadedUsers = (Option<SystemTime>, Vec<UserEntry>);
-
-/// Parse one `name:<PHC hash>[:role]` line; the role is `user` (default) or `admin`.
-/// PHC strings never contain `:`.
-fn parse_user_line(line: &str) -> Option<UserEntry> {
-    let mut fields = line.splitn(3, ':');
-    let name = fields.next()?.trim();
-    let hash = fields.next()?.trim();
-    let role = match fields.next().map(str::trim) {
-        None | Some("") => Role::User,
-        Some(r) => Role::parse(r)?,
-    };
-    (!name.is_empty() && !hash.is_empty()).then(|| UserEntry {
-        name: name.to_string(),
-        hash: hash.to_string(),
-        role,
-    })
-}
-
-/// `name:$argon2id$…[:role]` lines; `#` comments and blank lines are ignored, and so are lines
-/// with an unknown role (`doctor` reports them).
-pub struct Users {
-    path: PathBuf,
-    loaded: Mutex<Option<LoadedUsers>>,
-    verified: Mutex<HashMap<[u8; 32], i64>>,
-}
-
-impl Users {
-    pub fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            loaded: Mutex::new(None),
-            verified: Mutex::new(HashMap::new()),
-        }
-    }
-
-    fn entries(&self) -> Vec<UserEntry> {
-        let mtime = std::fs::metadata(&self.path)
-            .and_then(|m| m.modified())
-            .ok();
-        let mut loaded = self.loaded.lock();
-        if loaded.as_ref().is_none_or(|(t, _)| *t != mtime) {
-            let text = std::fs::read_to_string(&self.path).unwrap_or_default();
-            let entries = text
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty() && !l.starts_with('#'))
-                .filter_map(parse_user_line)
-                .collect();
-            *loaded = Some((mtime, entries));
-            self.verified.lock().clear();
-        }
-        loaded.as_ref().map(|(_, e)| e.clone()).unwrap_or_default()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries().is_empty()
-    }
-
-    pub fn has_admin(&self) -> bool {
-        self.entries().iter().any(|e| e.role == Role::Admin)
-    }
-
-    /// Lines that are neither blank, comments nor valid entries (for `doctor`).
-    pub fn invalid_lines(&self) -> Vec<usize> {
-        let text = std::fs::read_to_string(&self.path).unwrap_or_default();
-        text.lines()
-            .enumerate()
-            .filter(|(_, l)| {
-                let l = l.trim();
-                !l.is_empty() && !l.starts_with('#') && parse_user_line(l).is_none()
-            })
-            .map(|(i, _)| i + 1)
-            .collect()
-    }
-
-    /// The account's role if the password is right. Constant work for unknown users: a dummy
-    /// hash is verified so timing does not reveal names.
-    pub fn verify(&self, user: &str, password: &str) -> Option<Role> {
-        let key: [u8; 32] = Sha256::digest(format!("{user}\0{password}").as_bytes()).into();
-        let now = now_epoch();
-        // Reloading on change also clears remembered verifications.
-        let entries = self.entries();
-        let entry = entries.iter().find(|e| e.name == user);
-        if self
-            .verified
-            .lock()
-            .get(&key)
-            .is_some_and(|t| now - t < VERIFIED_CACHE_SECS)
-        {
-            return entry.map(|e| e.role);
-        }
-        let hash = entry.map(|e| e.hash.as_str());
-        static DUMMY: std::sync::LazyLock<String> =
-            std::sync::LazyLock::new(|| hash_password("timing equaliser").unwrap_or_default());
-        let ok = Argon2::default()
-            .verify_password(password.as_bytes(), hash.unwrap_or(DUMMY.as_str()))
-            .is_ok()
-            && hash.is_some();
-        if ok {
-            self.verified.lock().insert(key, now);
-        }
-        entry.filter(|_| ok).map(|e| e.role)
-    }
+/// A signed-in browser: the account and the account's `session_version` at sign-in. The current
+/// name and role are read from the database on every request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionRef {
+    pub user_id: i64,
+    pub version: i64,
+    pub method: &'static str,
 }
 
 struct Session {
-    principal: Principal,
+    at: SessionRef,
     expires: i64,
 }
 
@@ -163,7 +50,7 @@ pub struct Sessions {
 }
 
 impl Sessions {
-    pub fn create(&self, principal: Principal, ttl: u64) -> String {
+    pub fn create(&self, at: SessionRef, ttl: u64) -> String {
         let token = random_hex(32);
         let now = now_epoch();
         let mut map = self.map.lock();
@@ -171,22 +58,55 @@ impl Sessions {
         map.insert(
             token.clone(),
             Session {
-                principal,
+                at,
                 expires: now + ttl as i64,
             },
         );
         token
     }
 
-    pub fn get(&self, token: &str) -> Option<Principal> {
+    pub fn get(&self, token: &str) -> Option<SessionRef> {
         let map = self.map.lock();
         map.get(token)
             .filter(|s| s.expires > now_epoch())
-            .map(|s| s.principal.clone())
+            .map(|s| s.at)
     }
 
     pub fn remove(&self, token: &str) {
         self.map.lock().remove(token);
+    }
+
+    /// End every session of an account (deleted, or its sign-in changed).
+    pub fn remove_user(&self, user_id: i64) {
+        self.map.lock().retain(|_, s| s.at.user_id != user_id);
+    }
+}
+
+/// Recent failed sign-ins per client address; enough failures refuse further attempts for a
+/// while (on top of Argon2's cost and the delay after each failure).
+#[derive(Default)]
+pub struct Throttle {
+    failures: Mutex<HashMap<IpAddr, Vec<i64>>>,
+}
+
+impl Throttle {
+    pub fn blocked(&self, ip: IpAddr) -> bool {
+        let now = now_epoch();
+        let mut f = self.failures.lock();
+        let list = f.entry(ip).or_default();
+        list.retain(|t| now - t < FAILURE_WINDOW_SECS);
+        list.len() >= MAX_FAILURES
+    }
+
+    pub fn fail(&self, ip: IpAddr) {
+        let now = now_epoch();
+        let mut f = self.failures.lock();
+        f.retain(|_, l| l.last().is_some_and(|t| now - t < FAILURE_WINDOW_SECS));
+        f.entry(ip).or_default().push(now);
+    }
+
+    pub fn succeed(&self, ip: IpAddr) {
+        self.failures.lock().remove(&ip);
     }
 }
 
@@ -370,46 +290,17 @@ mod tests {
     }
 
     #[test]
-    fn users_file_verifies_hashes_and_reloads_on_change() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("admin-users");
-        std::fs::write(
-            &path,
-            format!(
-                "# accounts\nana:{}:admin\ncy:{}\nbad:{}:root\n",
-                hash_password("correct horse").unwrap(),
-                hash_password("cy-pw").unwrap(),
-                hash_password("x").unwrap()
-            ),
-        )
-        .unwrap();
-        let users = Users::new(path.clone());
-        assert_eq!(users.verify("ana", "correct horse"), Some(Role::Admin));
-        assert_eq!(
-            users.verify("cy", "cy-pw"),
-            Some(Role::User),
-            "role defaults to user"
-        );
-        assert_eq!(users.verify("ana", "wrong"), None);
-        assert_eq!(users.verify("bob", "correct horse"), None);
-        assert_eq!(users.verify("bad", "x"), None, "unknown role: line ignored");
-        assert_eq!(users.invalid_lines(), vec![4]);
-        assert!(users.has_admin());
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        std::fs::write(
-            &path,
-            format!("bob:{}:user\n", hash_password("pw").unwrap()),
-        )
-        .unwrap();
-        let t = SystemTime::now();
-        filetime_touch(&path, t);
-        assert_eq!(
-            users.verify("ana", "correct horse"),
-            None,
-            "removed user no longer accepted"
-        );
-        assert_eq!(users.verify("bob", "pw"), Some(Role::User));
-        assert!(!users.has_admin());
+    fn repeated_failures_from_one_address_are_refused_for_a_while() {
+        let t = Throttle::default();
+        let (a, b): (IpAddr, IpAddr) = ("10.0.0.1".parse().unwrap(), "10.0.0.2".parse().unwrap());
+        for _ in 0..MAX_FAILURES {
+            assert!(!t.blocked(a));
+            t.fail(a);
+        }
+        assert!(t.blocked(a));
+        assert!(!t.blocked(b), "per address");
+        t.succeed(a);
+        assert!(!t.blocked(a));
     }
 
     #[test]
@@ -432,15 +323,6 @@ mod tests {
         assert_eq!(to_root("/"), "");
         assert_eq!(to_root("/admin/"), "../");
         assert_eq!(to_root("/photocraft/0.5.0/index.html"), "../../");
-    }
-
-    fn filetime_touch(path: &std::path::Path, t: SystemTime) {
-        std::fs::File::options()
-            .write(true)
-            .open(path)
-            .unwrap()
-            .set_modified(t)
-            .unwrap();
     }
 
     #[test]

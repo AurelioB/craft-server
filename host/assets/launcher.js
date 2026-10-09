@@ -100,6 +100,15 @@ async function account() {
     admin.href = me.admin_url;
     admin.hidden = false;
   }
+  // Signed in with a password and the provider is configured: offer to link it, so the next
+  // sign-in can use the provider.
+  if (me.link_url) {
+    const link = document.getElementById("account-link");
+    link.textContent = `Link ${me.link_name}`;
+    link.href = me.link_url;
+    link.title = `Sign in with ${me.link_name} next time`;
+    link.hidden = false;
+  }
   const logout = document.getElementById("account-logout");
   logout.hidden = !me.can_logout;
   logout.addEventListener("click", async () => {

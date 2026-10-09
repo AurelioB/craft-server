@@ -25,6 +25,7 @@ pub mod server;
 pub mod status;
 pub mod store;
 pub mod timeutil;
+pub mod users;
 pub mod validate;
 pub mod version;
 

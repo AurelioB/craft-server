@@ -8,22 +8,46 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <form class="login" method="post" action="login">
+  <div class="login">
     <h1>Sign in</h1>
     <p class="muted">Craft Apps on this server.</p>
-    <p class="error" id="failed" hidden>Wrong user name or password.</p>
-    <input type="hidden" name="next" id="next">
-    <label for="user">User name</label>
-    <input id="user" name="user" autocomplete="username" required autofocus>
-    <label for="password">Password</label>
-    <input id="password" name="password" type="password" autocomplete="current-password" required>
-    <button class="primary" type="submit">Sign in</button>
-  </form>
-  <script>
+    <p class="error" id="failed" role="alert" hidden></p>
+    <form method="post" action="login" id="local" hidden>
+      <input type="hidden" name="next" id="next">
+      <label for="user">User name</label>
+      <input id="user" name="user" autocomplete="username" required>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button class="primary" type="submit">Sign in</button>
+    </form>
+    <p class="divider" id="or" hidden>or</p>
+    <a class="sso" id="sso" hidden></a>
+  </div>
+  <script type="module">
     const params = new URLSearchParams(location.search);
-    if (params.has("failed")) document.getElementById("failed").hidden = false;
     // The server validates this target again; it only ever redirects within the site.
-    document.getElementById("next").value = params.get("next") || "";
+    const next = params.get("next") || "";
+    const failed = params.get("failed");
+    if (failed) {
+      const box = document.getElementById("failed");
+      box.textContent = failed === "throttled"
+        ? "Too many failed attempts from this address. Try again in a few minutes."
+        : "Wrong user name or password.";
+      box.hidden = false;
+    }
+    const options = await fetch("options", { cache: "no-store" }).then((r) => r.json()).catch(() => ({ local: true }));
+    if (options.local) {
+      document.getElementById("next").value = next;
+      document.getElementById("local").hidden = false;
+      document.getElementById("user").focus();
+    }
+    if (options.oidc) {
+      const sso = document.getElementById("sso");
+      sso.textContent = `Sign in with ${options.oidc}`;
+      sso.href = `oidc/login?next=${encodeURIComponent(next)}`;
+      sso.hidden = false;
+      document.getElementById("or").hidden = !options.local;
+    }
   </script>
 </body>
 </html>

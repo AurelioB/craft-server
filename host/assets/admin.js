@@ -140,4 +140,128 @@ $("logout").addEventListener("click", async () => {
   location.href = "./";
 });
 
+// ---- Users ----------------------------------------------------------------------------------
+
+let users = null;
+let editing = null;
+
+// Account actions do not wait for app updates, unlike `button`.
+function userButton(label, onClick, title) {
+  const b = el("button", title ? { title } : {}, label);
+  b.addEventListener("click", onClick);
+  return b;
+}
+async function post(path, body) {
+  const res = await fetch(path, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json", "X-Craft-CSRF": csrf() },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401) location.reload();
+  return { ok: res.ok, data };
+}
+
+function signInText(u) {
+  const ways = [];
+  if (u.has_password && users.local) ways.push("password");
+  if (u.oidc) ways.push(users.oidc ? `${users.oidc} (linked)` : "OIDC (linked)");
+  if (!ways.length) ways.push(users.oidc ? `none yet: link ${users.oidc} or set a password` : "none: set a password");
+  return ways.join(", ");
+}
+
+function userRow(u) {
+  const tr = el("tr");
+  const name = el("td");
+  name.append(el("strong", {}, u.username));
+  if (u.id === users.me) name.append(el("span", { class: "sub" }, "you"));
+  tr.append(name);
+  tr.append(el("td", {}, u.email || "—"));
+  tr.append(el("td", {}, u.role));
+  tr.append(el("td", {}, signInText(u)));
+  tr.append(el("td", {}, when(u.last_login_at)));
+  const actions = el("div", { class: "actions" });
+  actions.append(userButton("Edit", () => openDialog(u)));
+  if (u.oidc) {
+    actions.append(
+      userButton("Unlink", async () => {
+        if (!confirm(`Remove the linked ${users.oidc || "OIDC"} identity from ${u.username}? Their sessions end.`)) return;
+        const r = await post(`api/users/${u.id}/unlink`);
+        if (!r.ok) showError(r.data.error || "Unlink failed");
+        loadUsers();
+      }, "Remove the linked sign-in identity"),
+    );
+  }
+  if (u.id !== users.me) {
+    actions.append(
+      userButton("Delete", async () => {
+        if (!confirm(`Delete ${u.username}? This cannot be undone.`)) return;
+        const r = await post(`api/users/${u.id}/delete`);
+        if (!r.ok) showError(r.data.error || "Delete failed");
+        loadUsers();
+      }),
+    );
+  }
+  const cell = el("td");
+  cell.append(actions);
+  tr.append(cell);
+  return tr;
+}
+
+async function loadUsers() {
+  const res = await fetch("api/users", { credentials: "same-origin", cache: "no-store" });
+  if (!res.ok) return;
+  users = await res.json();
+  $("users-section").hidden = !users.accounts_used;
+  const notes = [];
+  if (users.provider_roles) notes.push(`Roles of accounts linked to ${users.oidc} follow its groups at every sign-in.`);
+  if (users.oidc) notes.push(`People can link ${users.oidc} to their account from the launcher once signed in.`);
+  $("users-note").textContent = notes.join(" ");
+  $("users-note").hidden = !notes.length;
+  document.querySelector("#users tbody").replaceChildren(...users.users.map(userRow));
+}
+
+function openDialog(u) {
+  editing = u || null;
+  const form = $("user-form");
+  form.reset();
+  $("user-error").hidden = true;
+  $("user-title").textContent = u ? `Edit ${u.username}` : "Add user";
+  $("u-name").value = u ? u.username : "";
+  $("u-name").disabled = Boolean(u);
+  $("u-email").value = u?.email || "";
+  $("u-role").value = u ? u.role : "user";
+  const min = users.min_password;
+  $("u-password").minLength = min;
+  $("u-password").required = !u && users.local && !users.oidc;
+  $("u-password-hint").textContent = u
+    ? `Leave empty to keep the current password. A new one (at least ${min} characters) signs ${u.username} out everywhere.`
+    : users.oidc
+      ? `At least ${min} characters, or leave empty for an account that signs in with ${users.oidc} only.`
+      : `At least ${min} characters.`;
+  $("user-dialog").showModal();
+  (u ? $("u-email") : $("u-name")).focus();
+}
+
+$("user-new").addEventListener("click", () => openDialog(null));
+$("user-cancel").addEventListener("click", () => $("user-dialog").close());
+$("user-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const body = { email: $("u-email").value.trim(), role: $("u-role").value };
+  const password = $("u-password").value;
+  if (password) body.password = password;
+  const r = editing
+    ? await post(`api/users/${editing.id}`, body)
+    : await post("api/users", { ...body, username: $("u-name").value.trim() });
+  if (!r.ok) {
+    $("user-error").textContent = r.data.error || "Could not save";
+    $("user-error").hidden = false;
+    return;
+  }
+  $("user-dialog").close();
+  loadUsers();
+});
+
 load();
+loadUsers();

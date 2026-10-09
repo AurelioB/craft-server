@@ -141,8 +141,8 @@ routing; restrict the shared host in the proxy if the app must not be used there
 
 | Directory | Back up? | Notes |
 | --- | --- | --- |
-| `CONFIG_DIR` | yes | configuration, users file, token, OIDC secret (protect the backup) |
-| `STATE_DIR` | yes | pins, blocks, pending, history; small |
+| `CONFIG_DIR` | yes | configuration, token, OIDC secret (protect the backup) |
+| `STATE_DIR` | yes | pins, blocks, pending, history, accounts (`users.sqlite3`: protect the backup); small. Copy the database while the server is stopped, or with `sqlite3 users.sqlite3 ".backup copy.sqlite3"` |
 | `DATA_DIR` | optional | releases can be re-downloaded, but old versions may disappear upstream; back up to keep the ability to roll back |
 | `CACHE_DIR`, `WORK_DIR` | no | reproducible |
 

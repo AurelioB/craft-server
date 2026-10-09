@@ -16,7 +16,7 @@ use axum::routing::{get, post};
 
 use crate::activity::Activity;
 use crate::admin::{self, Jobs};
-use crate::auth::{Sessions, Users, request_host};
+use crate::auth::{Sessions, Throttle, request_host};
 use crate::config::{AppConfig, Config};
 use crate::layout::{self, MARKER, valid_release_name};
 use crate::login;
@@ -24,6 +24,7 @@ use crate::oidc::Oidc;
 use crate::serve::{CachePolicy, redirect, serve_dir, set_common_headers, simple};
 use crate::status;
 use crate::store::Store;
+use crate::users::UserDb;
 
 const LAUNCHER_HTML: &str = include_str!("../assets/index.html");
 const INSTALLING_HTML: &str = include_str!("../assets/installing.html");
@@ -31,27 +32,29 @@ const INSTALLING_HTML: &str = include_str!("../assets/installing.html");
 pub struct Shared {
     pub cfg: Arc<Config>,
     pub activity: Arc<Activity>,
-    pub users: Users,
+    pub users: UserDb,
     pub sessions: Sessions,
+    pub throttle: Throttle,
     pub oidc: Option<Oidc>,
     pub jobs: Jobs,
 }
 
 impl Shared {
-    pub fn new(cfg: Arc<Config>, activity: Arc<Activity>) -> Arc<Self> {
+    pub fn new(cfg: Arc<Config>, activity: Arc<Activity>) -> anyhow::Result<Arc<Self>> {
         let oidc = cfg
             .auth
             .oidc
             .clone()
             .map(|o| Oidc::new(o, cfg.updater.http_timeout_secs));
-        Arc::new(Self {
-            users: Users::new(cfg.auth.users_file.clone()),
+        Ok(Arc::new(Self {
+            users: UserDb::open(&cfg.paths.state)?,
             sessions: Sessions::default(),
+            throttle: Throttle::default(),
             oidc,
             jobs: Jobs::default(),
             cfg,
             activity,
-        })
+        }))
     }
 }
 
@@ -226,12 +229,19 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/auth/style.css", get(login::style))
         .route("/auth/logout", post(login::logout))
         .route("/auth/me", get(login::me))
+        .route("/auth/options", get(login::options))
         .route("/auth/oidc/login", get(login::oidc_login))
         .route("/auth/oidc/callback", get(login::oidc_callback))
         .route("/admin", get(admin::root_redirect))
         .route("/admin/", get(admin::index))
         .route("/admin/api/status", get(admin::api_status))
         .route("/admin/api/apps/{app}/{action}", post(admin::api_action))
+        .route(
+            "/admin/api/users",
+            get(admin::users_list).post(admin::users_create),
+        )
+        .route("/admin/api/users/{id}", post(admin::users_update))
+        .route("/admin/api/users/{id}/{action}", post(admin::users_action))
         .route("/admin/{name}", get(admin::asset))
         .fallback(app_request)
         .layer(middleware::from_fn_with_state(

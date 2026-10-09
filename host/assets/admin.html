@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="same-origin">
-  <title>Craft Apps — Updates</title>
+  <title>Craft Apps — Administration</title>
   <link rel="stylesheet" href="admin.css">
   <script type="module" src="admin.js"></script>
 </head>
 <body>
   <header>
     <div>
-      <h1>Updates</h1>
+      <h1>Administration</h1>
       <p class="muted" id="who"></p>
     </div>
     <div class="header-actions">
@@ -21,12 +21,48 @@
   </header>
   <main>
     <p id="error" class="error" role="alert" hidden></p>
+    <h2>Apps</h2>
     <table id="apps">
       <thead>
         <tr><th>App</th><th>Active</th><th>Latest</th><th>Waiting</th><th>Policy</th><th>Last check</th><th>Actions</th></tr>
       </thead>
       <tbody></tbody>
     </table>
+    <section id="users-section" hidden>
+      <div class="section-title">
+        <h2>Users</h2>
+        <button id="user-new" class="primary">Add user</button>
+      </div>
+      <p class="muted" id="users-note"></p>
+      <table id="users">
+        <thead>
+          <tr><th>User</th><th>E-mail</th><th>Role</th><th>Sign-in</th><th>Last sign-in</th><th>Actions</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+    <dialog id="user-dialog">
+      <form method="dialog" id="user-form" class="user-form">
+        <h2 id="user-title">Add user</h2>
+        <p class="error" id="user-error" role="alert" hidden></p>
+        <label for="u-name">User name</label>
+        <input id="u-name" name="username" autocomplete="off" required maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._@\-]*">
+        <label for="u-email">E-mail <span class="muted">(optional)</span></label>
+        <input id="u-email" name="email" type="email" autocomplete="off">
+        <label for="u-role">Role</label>
+        <select id="u-role" name="role">
+          <option value="user">User: apps only</option>
+          <option value="admin">Admin: apps and administration</option>
+        </select>
+        <label for="u-password">Password</label>
+        <input id="u-password" name="password" type="password" autocomplete="new-password">
+        <p class="muted" id="u-password-hint"></p>
+        <div class="dialog-actions">
+          <button type="button" id="user-cancel">Cancel</button>
+          <button type="submit" class="primary" id="user-save">Save</button>
+        </div>
+      </form>
+    </dialog>
     <section>
       <h2>Recent actions</h2>
       <ul id="results" class="log"></ul>

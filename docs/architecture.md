@@ -15,7 +15,7 @@ Modules of `craft-host`:
 | Module | Role |
 | --- | --- |
 | `server`, `serve` | HTTP routing, launcher, `/status.json`, health, app paths, static file serving |
-| `login`, `auth`, `oidc`, `access` | sign-in (`/auth/`), roles, apps gate, users file, sessions, CSRF, proxy identities, OIDC, settings |
+| `login`, `auth`, `oidc`, `users`, `access` | sign-in (`/auth/`), roles, apps gate, sessions, throttling, CSRF, proxy identities, OIDC, accounts in SQLite, settings |
 | `admin`, `assets` | `/admin` pages and API; embedded launcher assets (logos, fonts) |
 | `daemon`, `activity` | process start, background updater and heartbeat threads, idle activation, request activity |
 | `ops` | update lifecycle, activation policy, pins, rollback, retention |

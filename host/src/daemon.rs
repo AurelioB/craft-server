@@ -166,8 +166,8 @@ pub fn run(cfg: Config) -> Result<()> {
         crate::layout::reconcile(&cfg, &updater.store)?;
         updater.store.beat("starting")?;
     }
-    if cfg.admin.enabled && cfg.auth.method == crate::access::AuthMethod::None {
-        log::warn!("admin interface is enabled without sign-in ([auth] method = \"none\")");
+    if cfg.admin.enabled && cfg.auth.sign_in == crate::access::SignIn::None {
+        log::warn!("admin interface is enabled without sign-in ([auth] methods is empty)");
     }
 
     let phase = Arc::new(Mutex::new(String::from("idle")));
@@ -193,7 +193,7 @@ pub fn run(cfg: Config) -> Result<()> {
             .spawn(move || updater_loop(cfg, activity, phase))?;
     }
 
-    let shared = Shared::new(cfg, activity);
+    let shared = Shared::new(cfg, activity)?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?

@@ -68,39 +68,43 @@ impl ServerSettings {
     }
 }
 
+/// How people sign in (`[auth] methods`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthMethod {
+pub enum SignIn {
     /// Nobody signs in; every visitor counts as an administrator (only behind a protecting proxy).
     None,
-    /// HTTP Basic authentication against the users file.
+    /// HTTP Basic against the user database.
     Basic,
-    /// Login form with a session cookie, against the users file.
-    Form,
-    /// OpenID Connect authorization-code flow with PKCE.
-    Oidc,
     /// Identity from a header set by a trusted reverse proxy (forward auth).
     Proxy,
+    /// Sign-in page with a session cookie: local accounts (user database passwords), OpenID
+    /// Connect, or both.
+    Interactive { local: bool, oidc: bool },
 }
 
-impl AuthMethod {
-    pub fn name(self) -> &'static str {
-        match self {
-            AuthMethod::None => "none",
-            AuthMethod::Basic => "basic",
-            AuthMethod::Form => "form",
-            AuthMethod::Oidc => "oidc",
-            AuthMethod::Proxy => "proxy",
-        }
-    }
-
+impl SignIn {
     /// Methods with a session the user can end.
     pub fn has_sessions(self) -> bool {
-        matches!(self, AuthMethod::Form | AuthMethod::Oidc)
+        matches!(self, SignIn::Interactive { .. })
+    }
+
+    pub fn local(self) -> bool {
+        matches!(self, SignIn::Interactive { local: true, .. })
+    }
+
+    pub fn oidc(self) -> bool {
+        matches!(self, SignIn::Interactive { oidc: true, .. })
+    }
+
+    /// Methods that use the user database.
+    pub fn uses_accounts(self) -> bool {
+        !matches!(self, SignIn::None | SignIn::Proxy)
     }
 }
 
 /// What a signed-in account may do. Administrators may also use the apps.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Role {
     User,
     Admin,
@@ -141,6 +145,8 @@ pub enum CookieSecure {
 
 #[derive(Debug, Clone)]
 pub struct OidcSettings {
+    /// Label of the sign-in button, e.g. "Authentik".
+    pub name: String,
     pub issuer: String,
     pub client_id: String,
     pub client_secret_file: PathBuf,
@@ -148,6 +154,11 @@ pub struct OidcSettings {
     pub scopes: Vec<String>,
     pub username_claim: String,
     pub groups_claim: String,
+    /// Create an account on the first sign-in of an unknown identity.
+    pub create_users: bool,
+    /// Link an unknown identity to the account with the same address when the provider marks
+    /// the address verified. Off by default: it trusts the provider never to reassign addresses.
+    pub link_by_email: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -159,12 +170,13 @@ pub struct ProxyAuthSettings {
 /// `[auth]`: how people sign in and which role they get.
 #[derive(Debug, Clone)]
 pub struct AuthSettings {
-    pub method: AuthMethod,
+    pub sign_in: SignIn,
     pub apps: AppsAccess,
-    pub users_file: PathBuf,
     pub session_ttl_secs: u64,
     pub cookie_secure: CookieSecure,
-    /// For oidc and proxy: accounts and groups with the admin role.
+    /// For oidc and proxy: accounts and groups with the admin role. With OIDC, setting any of
+    /// these three lists makes the provider decide roles at every sign-in; otherwise roles are
+    /// managed in the user administration.
     pub admin_users: Vec<String>,
     pub admin_groups: Vec<String>,
     /// For oidc and proxy: groups with the user role; empty = every signed-in account.
@@ -174,6 +186,13 @@ pub struct AuthSettings {
 }
 
 impl AuthSettings {
+    /// Whether roles of OIDC accounts follow the provider's groups.
+    pub fn provider_roles(&self) -> bool {
+        !(self.admin_users.is_empty()
+            && self.admin_groups.is_empty()
+            && self.user_groups.is_empty())
+    }
+
     /// Role of an identity from OIDC or a trusted proxy; None = no access at all.
     pub fn role_for(&self, user: &str, groups: &[String]) -> Option<Role> {
         let in_any = |list: &[String]| groups.iter().any(|g| list.contains(g));
@@ -205,9 +224,8 @@ pub(crate) struct RawServer {
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawAuth {
-    method: Option<String>,
+    methods: Option<Vec<String>>,
     apps: Option<String>,
-    users_file: Option<String>,
     session_ttl: Option<crate::config::Quantity>,
     cookie_secure: Option<String>,
     admin_users: Option<Vec<String>>,
@@ -227,6 +245,9 @@ pub(crate) struct RawAdmin {
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawOidc {
+    name: Option<String>,
+    create_users: Option<bool>,
+    link_by_email: Option<bool>,
     issuer: Option<String>,
     client_id: Option<String>,
     client_secret_file: Option<String>,
@@ -316,17 +337,25 @@ pub(crate) fn build_auth(
     admin: &AdminSettings,
     problems: &mut Vec<String>,
 ) -> AuthSettings {
-    let method = match raw.method.as_deref().unwrap_or("none") {
-        "none" => AuthMethod::None,
-        "basic" => AuthMethod::Basic,
-        "form" => AuthMethod::Form,
-        "oidc" => AuthMethod::Oidc,
-        "proxy" => AuthMethod::Proxy,
-        other => {
+    let methods = raw.methods.unwrap_or_default();
+    for m in &methods {
+        if !["local", "oidc", "basic", "proxy"].contains(&m.as_str()) {
             problems.push(format!(
-                "[auth] method: {other:?} is not one of none, basic, form, oidc, proxy"
+                "[auth] methods: {m:?} is not one of local, oidc, basic, proxy"
             ));
-            AuthMethod::None
+        }
+    }
+    let has = |m: &str| methods.iter().any(|x| x == m);
+    let sign_in = match (has("local"), has("oidc"), has("basic"), has("proxy")) {
+        (false, false, false, false) => SignIn::None,
+        (local, oidc, false, false) => SignIn::Interactive { local, oidc },
+        (false, false, true, false) => SignIn::Basic,
+        (false, false, false, true) => SignIn::Proxy,
+        _ => {
+            problems.push(
+                "[auth] methods: \"local\" and \"oidc\" may be combined; \"basic\" and \"proxy\" must stand alone".into(),
+            );
+            SignIn::None
         }
     };
     let apps = match raw.apps.as_deref().unwrap_or("public") {
@@ -339,9 +368,9 @@ pub(crate) fn build_auth(
             AppsAccess::Public
         }
     };
-    if apps == AppsAccess::SignedIn && method == AuthMethod::None {
+    if apps == AppsAccess::SignedIn && sign_in == SignIn::None {
         problems.push(
-            "[auth] apps = \"signed-in\" needs a sign-in method: set [auth] method to basic, form, oidc or proxy".into(),
+            "[auth] apps = \"signed-in\" needs a sign-in method: set [auth] methods, e.g. [\"local\"]".into(),
         );
     }
     let cookie_secure = match raw.cookie_secure.as_deref().unwrap_or("auto") {
@@ -373,22 +402,24 @@ pub(crate) fn build_auth(
             problems.push(format!("[auth.proxy] {k}: {h:?} is not a header name"));
         }
     }
-    if method == AuthMethod::Proxy && server.trusted_proxies.is_empty() {
-        problems.push("[auth] method = \"proxy\" needs [server] trusted_proxies, otherwise any client could claim an identity".into());
+    if sign_in == SignIn::Proxy && server.trusted_proxies.is_empty() {
+        problems.push("[auth] methods = [\"proxy\"] needs [server] trusted_proxies, otherwise any client could claim an identity".into());
     }
     let admin_users = raw.admin_users.unwrap_or_default();
     let admin_groups = raw.admin_groups.unwrap_or_default();
     if admin.enabled
-        && matches!(method, AuthMethod::Oidc | AuthMethod::Proxy)
+        && sign_in == SignIn::Proxy
         && admin_users.is_empty()
         && admin_groups.is_empty()
     {
-        problems.push(format!(
-            "[auth] admin_groups or admin_users: required with method = \"{}\" while [admin] is enabled, so that only chosen accounts manage updates",
-            method.name()
-        ));
+        problems.push(
+            "[auth] admin_groups or admin_users: required with methods = [\"proxy\"] while [admin] is enabled, so that only chosen accounts manage updates".into(),
+        );
     }
     let oidc = raw.oidc.map(|o| OidcSettings {
+        name: o.name.unwrap_or_else(|| "single sign-on".into()),
+        create_users: o.create_users.unwrap_or(true),
+        link_by_email: o.link_by_email.unwrap_or(false),
         issuer: o
             .issuer
             .unwrap_or_default()
@@ -409,12 +440,14 @@ pub(crate) fn build_auth(
             .unwrap_or_else(|| "preferred_username".into()),
         groups_claim: o.groups_claim.unwrap_or_else(|| "groups".into()),
     });
-    if method == AuthMethod::Oidc && admin.host.is_some() {
-        problems.push("[admin] host: cannot be combined with [auth] method = \"oidc\": sign-in completes on the single redirect_url host, so the admin host would never get a session".into());
+    if sign_in.oidc() && admin.host.is_some() {
+        problems.push("[admin] host: cannot be combined with \"oidc\" in [auth] methods: sign-in completes on the single redirect_url host, so the admin host would never get a session".into());
     }
-    if method == AuthMethod::Oidc {
+    if sign_in.oidc() {
         match &oidc {
-            None => problems.push("[auth] method = \"oidc\" needs an [auth.oidc] section".into()),
+            None => {
+                problems.push("[auth] methods = [\"oidc\"] needs an [auth.oidc] section".into())
+            }
             Some(o) => {
                 if !o.issuer.starts_with("https://") && !o.issuer.starts_with("http://") {
                     problems.push("[auth.oidc] issuer: must be the provider's issuer URL".into());
@@ -435,12 +468,8 @@ pub(crate) fn build_auth(
         }
     }
     AuthSettings {
-        method,
+        sign_in,
         apps,
-        users_file: config_path(
-            config_dir,
-            &raw.users_file.unwrap_or_else(|| "users".into()),
-        ),
         session_ttl_secs,
         cookie_secure,
         admin_users,

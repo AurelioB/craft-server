@@ -882,9 +882,16 @@ fn restarts_and_retries_only_query_github_for_apps_that_are_due() {
     st.retry_after = Some(now_epoch() + 600);
     u.store.save("testcraft", &st).unwrap();
     let first = first_run(&e.cfg, &u.store);
-    assert!((now_epoch() + 595..=now_epoch() + 600).contains(&first), "{first}");
+    assert!(
+        (now_epoch() + 595..=now_epoch() + 600).contains(&first),
+        "{first}"
+    );
     cycle(&e.cfg, &u, false);
-    assert_eq!(gh.hits(&route), after_install, "waiting for the retry deadline");
+    assert_eq!(
+        gh.hits(&route),
+        after_install,
+        "waiting for the retry deadline"
+    );
 
     // Deadline passed: due again, one request.
     st.retry_after = Some(now_epoch() - 1);

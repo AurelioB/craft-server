@@ -71,6 +71,33 @@ impl Stack {
         out
     }
 
+    /// Run with `input` on standard input.
+    fn with_stdin(&self, args: &[&str], input: &str) -> Output {
+        use std::io::Write;
+        let mut child = self
+            .command(args, &[])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("docker compose");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        eprintln!(
+            "$ compose {} -> {}\n{}{}",
+            args.join(" "),
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    }
+
     fn ok(&self, args: &[&str]) -> String {
         let out = self.compose(args, &[]);
         assert!(out.status.success(), "compose {args:?} failed");
@@ -271,7 +298,7 @@ heartbeat_interval = "5s"
 [limits]
 min_free_space = 0
 [auth]
-method = "form"
+methods = ["local"]
 [admin]
 enabled = true
 [apps.testcraft]
@@ -292,17 +319,11 @@ artifact_patterns = ["testcraft-web-{version}.zip"]
         cfg.push_str(&format!("[apps.{id}]\nenabled = false\n"));
     }
     fs::write(base.join("config/config.toml"), cfg).unwrap();
-    fs::write(
-        base.join("config/users"),
-        format!(
-            "ana:{}:admin\n",
-            craft_host::auth::hash_password("s3cret").unwrap()
-        ),
+    fs::set_permissions(
+        base.join("config/config.toml"),
+        fs::Permissions::from_mode(0o640),
     )
     .unwrap();
-    for f in ["config/config.toml", "config/users"] {
-        fs::set_permissions(base.join(f), fs::Permissions::from_mode(0o640)).unwrap();
-    }
     let port = free_port();
     let env_file = base.join("test.env");
     let d = |n: &str| base.join(n).display().to_string();
@@ -358,10 +379,31 @@ fn compose_stack_end_to_end() {
     );
     assert!(out.status.success());
 
-    // Update from /admin (form login) without restarting the server; old URLs keep working.
+    // The first administrator comes from the CLI, inside the running container; the database
+    // stays private to the service's user and group.
+    let craft = ["exec", "-T", "host", "/usr/local/bin/craft-host"];
+    let add = s.with_stdin(
+        &[&craft[..], &["user", "add", "ana", "--role", "admin"]].concat(),
+        "s3cret-pw\n",
+    );
+    assert!(add.status.success());
+    let mode = fs::metadata(s.base.join("state/users.sqlite3"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o660, "{mode:o}");
+    let list = s.ok(&[&craft[..], &["user", "list"]].concat());
+    assert!(list.contains("ana") && list.contains("admin"), "{list}");
+
+    // Update from /admin (sign-in) without restarting the server; old URLs keep working.
     let started = s.started_at();
     s.publish("1.1.0", &[]);
-    let login = s.http("POST", "/auth/login", &[], Some("user=ana&password=s3cret"));
+    let login = s.http(
+        "POST",
+        "/auth/login",
+        &[],
+        Some("user=ana&password=s3cret-pw"),
+    );
     assert_eq!(login.status, 303, "{}", login.body);
     let session = login
         .cookies

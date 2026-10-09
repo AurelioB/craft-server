@@ -37,6 +37,8 @@ struct Pending {
     verifier: String,
     /// Site-relative page to return to after signing in.
     next: String,
+    /// Link the identity to this signed-in account instead of signing in.
+    link: Option<i64>,
     expires: i64,
 }
 
@@ -49,11 +51,20 @@ pub struct Oidc {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Identity {
+    /// Stable identifier at the provider (`sub`); with the issuer it names the person.
+    pub subject: String,
+    /// Preferred user name (`username_claim`, else `sub`).
     pub user: String,
     pub groups: Vec<String>,
+    pub email: Option<String>,
+    pub email_verified: bool,
 }
 
 impl Oidc {
+    pub fn settings(&self) -> &OidcSettings {
+        &self.settings
+    }
+
     pub fn new(settings: OidcSettings, timeout_secs: u64) -> Self {
         let agent = ureq::Agent::config_builder()
             .http_status_as_error(false)
@@ -107,9 +118,10 @@ impl Oidc {
     /// Start a login that returns to `next`: the provider URL to redirect the browser to and the
     /// `state`, which the caller binds to the browser (cookie) so a callback cannot be replayed in
     /// another browser.
-    pub fn start(&self, next: String) -> Result<(String, String)> {
+    pub fn start(&self, next: String, link: Option<i64>) -> Result<(String, String)> {
         let d = self.discovery()?;
         let state = random_hex(24);
+        // `state` is bound to the browser by a cookie; see login.rs.
         let nonce = random_hex(24);
         let verifier = URL_SAFE_NO_PAD.encode(random_hex(32));
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
@@ -123,6 +135,7 @@ impl Oidc {
                     nonce: nonce.clone(),
                     verifier,
                     next,
+                    link,
                     expires: now + PENDING_TTL,
                 },
             );
@@ -142,9 +155,9 @@ impl Oidc {
         Ok((url, state))
     }
 
-    /// Finish a login from the callback's `code` and `state`: the identity and the page to
-    /// return to.
-    pub fn finish(&self, code: &str, state: &str) -> Result<(Identity, String)> {
+    /// Finish a login from the callback's `code` and `state`: the identity, the page to return
+    /// to and the account to link it to, if the login was started for linking.
+    pub fn finish(&self, code: &str, state: &str) -> Result<(Identity, String, Option<i64>)> {
         let pending = self
             .pending
             .lock()
@@ -187,7 +200,7 @@ impl Oidc {
             .as_str()
             .ok_or_else(|| anyhow!("token response has no id_token"))?;
         let identity = self.identity_from(id_token, &d.issuer, &pending.nonce)?;
-        Ok((identity, pending.next))
+        Ok((identity, pending.next, pending.link))
     }
 
     fn identity_from(&self, id_token: &str, issuer: &str, nonce: &str) -> Result<Identity> {
@@ -228,12 +241,25 @@ impl Oidc {
             claims["nonce"].as_str() == Some(nonce),
             "id_token nonce mismatch"
         );
+        let subject = claims["sub"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow!("id_token has no subject"))?
+            .to_string();
         let user = claims[self.settings.username_claim.as_str()]
             .as_str()
-            .or_else(|| claims["sub"].as_str())
             .filter(|u| !u.is_empty())
-            .ok_or_else(|| anyhow!("id_token has no user name"))?
+            .unwrap_or(&subject)
             .to_string();
+        let email = claims["email"]
+            .as_str()
+            .filter(|e| !e.is_empty())
+            .map(str::to_string);
+        let email_verified = match &claims["email_verified"] {
+            serde_json::Value::Bool(b) => *b,
+            serde_json::Value::String(s) => s == "true",
+            _ => false,
+        };
         let groups = match &claims[self.settings.groups_claim.as_str()] {
             serde_json::Value::Array(a) => a
                 .iter()
@@ -242,10 +268,16 @@ impl Oidc {
             serde_json::Value::String(s) => vec![s.clone()],
             _ => vec![],
         };
-        if user.contains(['\r', '\n']) {
+        if user.contains(['\r', '\n']) || subject.contains(['\r', '\n']) {
             bail!("invalid user name");
         }
-        Ok(Identity { user, groups })
+        Ok(Identity {
+            subject,
+            user,
+            groups,
+            email,
+            email_verified,
+        })
     }
 }
 
@@ -257,6 +289,9 @@ mod tests {
     fn oidc() -> Oidc {
         Oidc::new(
             OidcSettings {
+                name: "Test".into(),
+                create_users: true,
+                link_by_email: false,
                 issuer: "https://id.example.net".into(),
                 client_id: "craft".into(),
                 client_secret_file: PathBuf::from("/nonexistent"),
@@ -280,14 +315,23 @@ mod tests {
     fn id_token_claims_are_validated() {
         let o = oidc();
         let exp = now_epoch() + 300;
-        let good = serde_json::json!({"iss": "https://id.example.net", "aud": "craft", "exp": exp, "nonce": "n1", "preferred_username": "ana", "groups": ["admins"]});
+        let good = serde_json::json!({"iss": "https://id.example.net", "aud": "craft", "exp": exp, "nonce": "n1", "sub": "u-1", "preferred_username": "ana", "groups": ["admins"], "email": "ana@example.net", "email_verified": true});
         assert_eq!(
             o.identity_from(&token(good.clone()), "https://id.example.net", "n1")
                 .unwrap(),
             Identity {
+                subject: "u-1".into(),
                 user: "ana".into(),
-                groups: vec!["admins".into()]
+                groups: vec!["admins".into()],
+                email: Some("ana@example.net".into()),
+                email_verified: true,
             }
+        );
+        let mut no_sub = good.clone();
+        no_sub.as_object_mut().unwrap().remove("sub");
+        assert!(
+            o.identity_from(&token(no_sub), "https://id.example.net", "n1")
+                .is_err()
         );
         for (field, value, expect) in [
             ("iss", serde_json::json!("https://evil"), "issuer"),

@@ -4,9 +4,11 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
+use craft_host::access::Role;
 use craft_host::config::{Config, Paths, load_config};
 use craft_host::ops::{Outcome, Updater};
-use craft_host::{auth, daemon, doctor, fsutil, layout, logging, status};
+use craft_host::users::{NewUser, UserDb, UserUpdate};
+use craft_host::{daemon, doctor, fsutil, layout, logging, status};
 
 /// Craft Apps Host: serves the Craft browser apps, keeps them updated, and the operator CLI.
 #[derive(Parser)]
@@ -57,9 +59,42 @@ enum Command {
     },
     /// Exit 0 if the server answers /healthz (container health check).
     Healthcheck,
-    /// Read a password from standard input and print an Argon2 hash for the users file
-    /// (lines `name:<hash>:admin` or `name:<hash>:user`).
-    HashPassword,
+    /// Manage accounts in the user database (STATE_DIR/users.sqlite3). Passwords are read
+    /// from standard input.
+    User {
+        #[command(subcommand)]
+        action: UserCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum UserCommand {
+    /// List accounts.
+    List,
+    /// Add an account; the password is read from standard input unless --no-password.
+    Add {
+        name: String,
+        #[arg(long)]
+        email: Option<String>,
+        /// user or admin
+        #[arg(long, default_value = "user")]
+        role: String,
+        /// Create the account without a password (OIDC sign-in only).
+        #[arg(long)]
+        no_password: bool,
+    },
+    /// Set a new password (from standard input); ends the account's sessions.
+    SetPassword { name: String },
+    /// Set the role: user or admin.
+    SetRole { name: String, role: String },
+    /// Set the e-mail address; without one, remove it.
+    SetEmail { name: String, email: Option<String> },
+    /// Remove the linked OpenID Connect identity.
+    Unlink { name: String },
+    /// Delete an account.
+    Delete { name: String },
+    /// Import "name:<argon2 hash>[:user|admin]" lines, e.g. from an earlier users file.
+    Import { file: std::path::PathBuf },
 }
 
 fn load() -> Result<Config, String> {
@@ -89,7 +124,9 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             | Command::Doctor { .. }
             | Command::History { .. }
             | Command::Healthcheck
-            | Command::HashPassword
+            | Command::User {
+                action: UserCommand::List
+            }
     );
     // SAFETY: plain libc identity query.
     if mutating
@@ -106,18 +143,6 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         fsutil::set_umask(mask);
     }
 
-    if let Command::HashPassword = cli.command {
-        let mut pw = String::new();
-        std::io::stdin()
-            .read_to_string(&mut pw)
-            .map_err(|e| e.to_string())?;
-        let pw = pw.trim_end_matches(['\r', '\n']);
-        if pw.is_empty() {
-            return Err("no password on standard input".into());
-        }
-        println!("{}", auth::hash_password(pw).map_err(|e| e.to_string())?);
-        return Ok(ExitCode::SUCCESS);
-    }
     if let Command::Doctor { offline } = cli.command {
         let report = doctor::run(Paths::from_env(), !offline);
         print!("{}", report.render());
@@ -267,8 +292,166 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             println!("{}", updater.allow(a, &version).map_err(err)?);
             Ok(ExitCode::SUCCESS)
         }
-        Command::HashPassword | Command::Doctor { .. } => unreachable!(),
+        Command::User { action } => user_command(&cfg, action),
+        Command::Doctor { .. } => unreachable!(),
     }
+}
+
+fn read_password() -> Result<String, String> {
+    let mut pw = String::new();
+    std::io::stdin()
+        .read_to_string(&mut pw)
+        .map_err(|e| e.to_string())?;
+    let pw = pw.trim_end_matches(['\r', '\n']).to_string();
+    if pw.is_empty() {
+        return Err("no password on standard input".into());
+    }
+    Ok(pw)
+}
+
+fn parse_role(text: &str) -> Result<Role, String> {
+    Role::parse(text).ok_or_else(|| format!("{text:?}: the role is user or admin"))
+}
+
+fn user_command(cfg: &Config, action: UserCommand) -> Result<ExitCode, String> {
+    let db = UserDb::open(&cfg.paths.state).map_err(|e| format!("{e:#}"))?;
+    let find = |name: &str| -> Result<i64, String> {
+        db.by_username(name)
+            .map_err(|e| e.to_string())?
+            .map(|u| u.id)
+            .ok_or_else(|| format!("no user {name:?}"))
+    };
+    let e = |e: craft_host::users::UserError| e.to_string();
+    match action {
+        UserCommand::List => {
+            println!(
+                "{:<24} {:<6} {:<30} {:<8} {:<5} LAST SIGN-IN",
+                "USER", "ROLE", "E-MAIL", "PASSWORD", "OIDC"
+            );
+            for u in db.list().map_err(e)? {
+                println!(
+                    "{:<24} {:<6} {:<30} {:<8} {:<5} {}",
+                    u.username,
+                    u.role.name(),
+                    u.email.as_deref().unwrap_or("-"),
+                    if u.has_password { "yes" } else { "no" },
+                    if u.oidc.is_some() { "yes" } else { "no" },
+                    u.last_login_at.as_deref().unwrap_or("never")
+                );
+            }
+        }
+        UserCommand::Add {
+            name,
+            email,
+            role,
+            no_password,
+        } => {
+            let role = parse_role(&role)?;
+            let password = if no_password {
+                None
+            } else {
+                Some(read_password()?)
+            };
+            let u = db
+                .create(NewUser {
+                    username: &name,
+                    email: email.as_deref(),
+                    password: password.as_deref(),
+                    role,
+                })
+                .map_err(e)?;
+            println!("added {} ({})", u.username, u.role.name());
+        }
+        UserCommand::SetPassword { name } => {
+            let id = find(&name)?;
+            let pw = read_password()?;
+            db.update(
+                id,
+                UserUpdate {
+                    password: Some(&pw),
+                    ..Default::default()
+                },
+            )
+            .map_err(e)?;
+            println!("{name}: password changed; existing sessions end");
+        }
+        UserCommand::SetRole { name, role } => {
+            let id = find(&name)?;
+            let u = db
+                .update(
+                    id,
+                    UserUpdate {
+                        role: Some(parse_role(&role)?),
+                        ..Default::default()
+                    },
+                )
+                .map_err(e)?;
+            println!("{}: role {}", u.username, u.role.name());
+        }
+        UserCommand::SetEmail { name, email } => {
+            let id = find(&name)?;
+            let u = db
+                .update(
+                    id,
+                    UserUpdate {
+                        email: Some(email.as_deref()),
+                        ..Default::default()
+                    },
+                )
+                .map_err(e)?;
+            println!(
+                "{}: e-mail {}",
+                u.username,
+                u.email.as_deref().unwrap_or("removed")
+            );
+        }
+        UserCommand::Unlink { name } => {
+            db.unlink_oidc(find(&name)?).map_err(e)?;
+            println!("{name}: linked identity removed; existing sessions end");
+        }
+        UserCommand::Delete { name } => {
+            db.delete(find(&name)?).map_err(e)?;
+            println!("{name}: deleted");
+        }
+        UserCommand::Import { file } => {
+            let text = std::fs::read_to_string(&file)
+                .map_err(|err| format!("{}: {err}", file.display()))?;
+            let mut failed = false;
+            for (n, line) in text.lines().enumerate().map(|(i, l)| (i + 1, l.trim())) {
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let mut f = line.splitn(3, ':');
+                let (Some(name), Some(hash)) = (f.next(), f.next()) else {
+                    eprintln!("line {n}: expected name:<hash>[:role]");
+                    failed = true;
+                    continue;
+                };
+                let role = match f.next().map(str::trim).filter(|r| !r.is_empty()) {
+                    None => Role::User,
+                    Some(r) => match parse_role(r) {
+                        Ok(r) => r,
+                        Err(err) => {
+                            eprintln!("line {n}: {err}");
+                            failed = true;
+                            continue;
+                        }
+                    },
+                };
+                match db.create_with_hash(name.trim(), hash.trim(), role) {
+                    Ok(u) => println!("imported {} ({})", u.username, u.role.name()),
+                    Err(err) => {
+                        eprintln!("line {n}: {err}");
+                        failed = true;
+                    }
+                }
+            }
+            if failed {
+                return Ok(ExitCode::FAILURE);
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn main() -> ExitCode {

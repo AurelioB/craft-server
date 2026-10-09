@@ -6,7 +6,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::access::{AppsAccess, AuthMethod};
+use crate::access::{AppsAccess, Role, SignIn};
 use crate::config::{Config, ConfigError, Paths, load_config};
 use crate::fsutil::{current_umask, free_bytes, parse_umask, random_hex};
 
@@ -301,70 +301,89 @@ fn check_auth(r: &mut Report, cfg: &Config, network: bool) {
             "admin interface at /admin/ on the apps' port and browser origin ([admin] host would separate it); {apps}"
         )),
     }
-    match auth.method {
-        AuthMethod::None => {
+    match auth.sign_in {
+        SignIn::None => {
             if admin.enabled {
                 r.warn(
-                    "[auth] method = \"none\": anyone who reaches /admin can update, pin and roll back apps",
-                    Some("only use this behind a proxy that authenticates /admin, or choose basic, form, oidc or proxy".into()),
+                    "[auth] methods is empty: anyone who reaches /admin can update, pin and roll back apps",
+                    Some("only use this behind a proxy that authenticates /admin, or set [auth] methods".into()),
                 );
             }
         }
-        AuthMethod::Basic | AuthMethod::Form => {
-            check_secret_file(r, "users file", &auth.users_file);
-            let users = crate::auth::Users::new(auth.users_file.clone());
-            let bad = users.invalid_lines();
-            if !bad.is_empty() {
-                r.fail(
-                    format!("users file {}: lines {bad:?} are not `name:<hash>[:user|admin]`; they are ignored", auth.users_file.display()),
-                    None,
-                );
-            }
-            if users.is_empty() {
-                r.fail(
-                    format!("users file {} has no users", auth.users_file.display()),
-                    Some("add lines `name:<hash>:admin` or `name:<hash>:user`; create hashes with `craft-host hash-password`".into()),
-                );
-            } else if admin.enabled && !users.has_admin() {
-                r.warn(
-                    format!(
-                        "users file {} has no account with the admin role",
-                        auth.users_file.display()
-                    ),
-                    Some("end an account's line with `:admin`".into()),
-                );
-            }
-        }
-        AuthMethod::Oidc => {
-            if let Some(o) = &auth.oidc {
-                if o.client_secret_file.exists() {
-                    check_secret_file(r, "OIDC client secret", &o.client_secret_file);
-                } else {
-                    r.warn(
-                        "no OIDC client secret file; logging in as a public client (PKCE only)",
-                        None,
-                    );
-                }
-                if network {
-                    let oidc = crate::oidc::Oidc::new(o.clone(), cfg.updater.http_timeout_secs);
-                    match oidc.start(String::new()) {
-                        Ok(_) => r.ok(format!("OIDC provider {} reachable", o.issuer)),
-                        Err(e) => r.fail(format!("OIDC provider {}: {e:#}", o.issuer), None),
-                    }
-                }
-            }
-        }
-        AuthMethod::Proxy => r.ok(format!(
+        SignIn::Proxy => r.ok(format!(
             "identities are taken from {} sent by {} trusted proxy network(s)",
             auth.proxy.user_header,
             cfg.server.trusted_proxies.len()
         )),
+        SignIn::Basic | SignIn::Interactive { .. } => check_accounts(r, cfg),
     }
-    if matches!(auth.method, AuthMethod::Oidc | AuthMethod::Proxy)
-        && auth.user_groups.is_empty()
-        && auth.apps == AppsAccess::SignedIn
+    if let (true, Some(o)) = (auth.sign_in.oidc(), &auth.oidc) {
+        if o.client_secret_file.exists() {
+            check_secret_file(r, "OIDC client secret", &o.client_secret_file);
+        } else {
+            r.warn(
+                "no OIDC client secret file; logging in as a public client (PKCE only)",
+                None,
+            );
+        }
+        if network {
+            let oidc = crate::oidc::Oidc::new(o.clone(), cfg.updater.http_timeout_secs);
+            match oidc.start(String::new(), None) {
+                Ok(_) => r.ok(format!("OIDC provider {} reachable", o.issuer)),
+                Err(e) => r.fail(format!("OIDC provider {}: {e:#}", o.issuer), None),
+            }
+        }
+        if auth.provider_roles() {
+            r.ok("roles of OIDC accounts follow the provider's groups at every sign-in");
+        }
+    }
+}
+
+/// The user database exists, is private to the server's user and group, and has an
+/// administrator who can sign in.
+fn check_accounts(r: &mut Report, cfg: &Config) {
+    let path = cfg.paths.state.join(crate::users::DB_FILE);
+    if !path.exists() {
+        r.warn(
+            format!("user database {} does not exist yet", path.display()),
+            Some("create the first administrator: craft-host user add NAME --role admin".into()),
+        );
+        return;
+    }
+    if let Ok(m) = fs::metadata(&path)
+        && m.permissions().mode() & 0o007 != 0
     {
-        r.ok("every account the identity provider signs in may use the apps ([auth] user_groups is empty)");
+        r.fail(
+            format!(
+                "user database {} is readable by other users",
+                path.display()
+            ),
+            Some(format!("chmod 0660 {}", path.display())),
+        );
+    }
+    let db = match crate::users::UserDb::open(&cfg.paths.state) {
+        Ok(db) => db,
+        Err(e) => return r.fail(format!("user database: {e:#}"), None),
+    };
+    let users = db.list().unwrap_or_default();
+    let admins: Vec<_> = users.iter().filter(|u| u.role == Role::Admin).collect();
+    let sign_in = cfg.auth.sign_in;
+    // An admin can sign in with a password (local, basic) or with a linked or linkable OIDC
+    // identity; with provider roles the provider can make anyone an admin.
+    let usable = admins.iter().any(|u| {
+        (u.has_password && (sign_in.local() || sign_in == SignIn::Basic))
+            || (sign_in.oidc() && u.oidc.is_some())
+    }) || (sign_in.oidc() && cfg.auth.provider_roles());
+    r.ok(format!(
+        "user database: {} account(s), {} administrator(s)",
+        users.len(),
+        admins.len()
+    ));
+    if cfg.admin.enabled && !usable {
+        r.fail(
+            "no administrator can sign in with the configured [auth] methods",
+            Some("craft-host user add NAME --role admin (password on standard input), or craft-host user set-password NAME".into()),
+        );
     }
 }
 
