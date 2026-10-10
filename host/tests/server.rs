@@ -1007,8 +1007,28 @@ fn oidc_login_validates_state_nonce_and_maps_groups_to_roles() {
         Some("../auth/oidc/login?next=testcraft%2F")
     );
 
+    // Another host name for this server continues the sign-in on the callback's host.
+    let lan = get(
+        &format!("{u}/auth/oidc/login?next=admin%2F"),
+        &[("Host", "apps.lan.example.net")],
+    );
+    assert_eq!(
+        (lan.status, lan.header("location")),
+        (
+            303,
+            Some("https://apps.example.net/auth/oidc/login?next=admin%2F")
+        )
+    );
+    assert!(
+        lan.cookies().is_empty(),
+        "no state cookie on the other host"
+    );
+
     let login = |next: &str, claims: &dyn Fn(&str) -> serde_json::Value| -> Resp {
-        let start = get(&format!("{u}/auth/oidc/login?next={next}"), &[]);
+        let start = get(
+            &format!("{u}/auth/oidc/login?next={next}"),
+            &[("Host", "apps.example.net")],
+        );
         assert_eq!(start.status, 303);
         let loc = start.header("location").unwrap().to_string();
         assert!(
@@ -1319,7 +1339,7 @@ fn local_and_oidc_sign_in_combine_and_link_explicitly() {
     let oidc = |extra: &str, cookie: &str, sub: &str, name: &str| -> Resp {
         let start = get(
             &format!("{u}/auth/oidc/login?next={extra}"),
-            &[("Cookie", cookie)],
+            &[("Cookie", cookie), ("Host", "apps.example.net")],
         );
         if start.status != 303 {
             return start;
@@ -1361,7 +1381,14 @@ fn local_and_oidc_sign_in_combine_and_link_explicitly() {
     );
 
     // Linking needs a signed-in account and binds the identity to that account.
-    assert_eq!(get(&format!("{u}/auth/oidc/login?link=1"), &[]).status, 403);
+    assert_eq!(
+        get(
+            &format!("{u}/auth/oidc/login?link=1"),
+            &[("Host", "apps.example.net")]
+        )
+        .status,
+        403
+    );
     let ana = session_from(&form_login(u, "ana", "s3cret-pw", ""));
     let me = json_body(&get(&format!("{u}/auth/me"), &[("Cookie", &ana)]));
     assert_eq!(
@@ -1374,7 +1401,7 @@ fn local_and_oidc_sign_in_combine_and_link_explicitly() {
     let other = session_from(&form_login(u, "ana", "s3cret-pw", ""));
     let start = get(
         &format!("{u}/auth/oidc/login?link=1"),
-        &[("Cookie", other.as_str())],
+        &[("Cookie", other.as_str()), ("Host", "apps.example.net")],
     );
     let state = param(start.header("location").unwrap(), "state").to_string();
     request(

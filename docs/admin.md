@@ -164,7 +164,9 @@ someone again. In Authentik, for example, create the groups `craft-admins` and `
 and assign people to them; its default `profile` scope mapping sends them in the `groups` claim.
 
 Register `redirect_url` with the provider; it must be the address people use, because the
-session cookie is set for that host. The server reads the provider metadata from
+session cookie is set for that host. A sign-in started on another host name for the same server
+(for example a `*.lan` alias behind a local proxy) is sent to `redirect_url`'s host first and
+continues there, so after signing in people use the canonical address. The server reads the provider metadata from
 `<issuer>/.well-known/openid-configuration`, sends the browser to the authorization endpoint with
 `state`, `nonce` and a PKCE S256 challenge (the `state` is also bound to the browser by a
 cookie), and exchanges the code at the token endpoint (client secret via HTTP Basic). It checks

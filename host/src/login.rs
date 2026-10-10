@@ -381,6 +381,37 @@ pub async fn oidc_login(
         return not_found();
     }
     let c = ctx(&s, &headers, peer);
+    // The state cookie and the session must be set on the host the provider returns to. A
+    // sign-in started on another name for this server (e.g. a LAN alias) continues there.
+    if let Some(canonical) = s
+        .oidc
+        .as_ref()
+        .and_then(|o| callback_origin(&o.settings().redirect_url))
+        && c.host
+            .as_deref()
+            .is_some_and(|h| !h.eq_ignore_ascii_case(&canonical.1))
+    {
+        let query = q
+            .next
+            .as_deref()
+            .map(|n| format!("next={}", query_escape(&safe_next(Some(n)))));
+        let link = q
+            .link
+            .as_deref()
+            .filter(|l| *l == "1")
+            .map(|_| "link=1".to_string());
+        let params: Vec<String> = query.into_iter().chain(link).collect();
+        let target = format!(
+            "{}/auth/oidc/login{}",
+            canonical.0,
+            if params.is_empty() {
+                String::new()
+            } else {
+                format!("?{}", params.join("&"))
+            }
+        );
+        return redirect(StatusCode::SEE_OTHER, &target);
+    }
     let next = safe_next(q.next.as_deref());
     let link = if q.link.as_deref() == Some("1") {
         match authenticate(&s, &headers, &c) {
@@ -410,6 +441,14 @@ pub async fn oidc_login(
         }
         _ => simple(StatusCode::INTERNAL_SERVER_ERROR, "internal error\n"),
     }
+}
+
+/// `(origin, host)` of the configured callback URL, e.g. `("https://apps.example.net",
+/// "apps.example.net")`. The host keeps an explicit port, like the `Host` header does.
+fn callback_origin(redirect_url: &str) -> Option<(String, String)> {
+    let (scheme, rest) = redirect_url.split_once("://")?;
+    let host = rest.split('/').next().filter(|h| !h.is_empty())?;
+    Some((format!("{scheme}://{host}"), host.to_ascii_lowercase()))
 }
 
 #[derive(Deserialize)]

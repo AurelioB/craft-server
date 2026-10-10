@@ -3,6 +3,15 @@
 All notable changes to Craft Apps Host are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.1] - 2026-10-10
+
+### Fixed
+
+- OpenID Connect sign-in started on another host name for the server (for example a LAN alias
+  behind a local reverse proxy) now continues on the host of `redirect_url`, so the browser-bound
+  state and the session cookie land where the provider returns. Previously such a sign-in was
+  refused as "not started in this browser".
+
 ## [0.1.0] - 2026-10-08
 
 ### Added
